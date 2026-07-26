@@ -1,0 +1,29 @@
+# Function boundary overrides for Rockstar Games Presents Table Tennis codegen.
+#
+# The automatic scanner mis-splits or mis-merges some functions. Each entry here
+# pins a boundary the scanner got wrong. Add entries as `generate-all` reports
+# unresolved calls or the recompiled build misbehaves at a known address.
+#
+# Entry forms:
+#   "0xADDR" = { end = 0xADDR }              explicit end address
+#   "0xADDR" = { end = 0xADDR, parent = 0x } tail/branch belonging to a parent
+#   "0xADDR" = { name = "..." }              give a function a readable name
+#
+# Image base is 0x82000000 (see docs/xex.md).
+
+[functions]
+
+# A pair of near-identical virtual-call dispatchers, each reached only by a
+# tail-branch from a C++ adjustor thunk (`addi r3,r3,4` then `b`) at
+# 0x82468A38 and 0x82468A40. Nothing ever *calls* them, so the scanner never
+# registered them as function starts and reported "target not in any function".
+#
+# Both open with `clrlwi r11,r4,24; cmplwi cr6,r11,2` and are 0xC8 bytes long,
+# each ending in a `blr` immediately before the next one begins.
+"0x8245FD08" = { end = 0x8245FDD0 }
+"0x8245FDD0" = { end = 0x8245FE98 }
+
+# Same situation: branched to from 0x82245464, never called. Starts after the
+# `blr` at 0x8224673C and ends at the `blr` at 0x822467F4; the next function's
+# prologue (mflr r12) is at 0x822467F8.
+"0x82246740" = { end = 0x822467F8 }

@@ -1,0 +1,26 @@
+# Build output and generated recompilation sources
+/out/
+/build/
+/generated/
+
+# Retail media and extracted game files. Users must supply their own copy.
+/game/
+*.iso
+*.xex
+*.xexp
+*.rpf
+*.bik
+
+# Diagnostics
+*.log
+*.dmp
+
+# Editor and CMake scratch
+/.vs/
+/.vscode/
+/.idea/
+/.cache/
+CMakeUserPresets.json
+
+# SDK build output
+/third_party/rexglue-sdk/out/

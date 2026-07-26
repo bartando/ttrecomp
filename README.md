@@ -45,7 +45,7 @@ XEX details: `XEX2`, image base `0x82000000`, 16 optional headers.
 config/     function boundary overrides fed to codegen
 game/       extracted disc files (gitignored; supply your own)
 run.sh      launcher (sets DYLD_LIBRARY_PATH, deploys the config)
-autotest.sh drive the game with synthetic keys + screenshot
+repro.sh    drive to the character-select screen and screenshot it
 trace.sh    capture shaders + GPU trace for rendering bugs
 src/        host-side glue code
 third_party/rexglue-sdk   the SDK, as a git submodule
@@ -209,19 +209,37 @@ Ruled out by experiment:
   declines to register it, because games handle "device not found" cleanly
   but not device errors.
 
+Also ruled out, each measured on the repro screen (see below):
+
+| Change | Face brightness |
+| --- | --- |
+| baseline | 3.6 |
+| `native_2x_msaa=false` | 3.6 |
+| `vulkan_dynamic_rendering=false` | 3.7 |
+| `readback_resolve=full`, `vulkan_readback_resolve=true` | 0.0 (worse) |
+| native draw resolution | 3.6 |
+
+Correct skin would read as a mid-tone; the shirt reference reads ~23 on the
+same frames, so the measurement is sound.
+
+What the per-frame GPU summary says (run with
+`--vulkan_debug_log_frame_summaries_remaining=100000`): the character-select
+frame issues 1765 draws, 1573 of them textured, with `placeholder=0` and
+`no_effect=0`. So every pipeline is compiled and the skin draws really are
+executing and sampling textures - they simply shade to black. That rules out
+a missing or still-compiling pipeline, and points at either the skin
+material's shader math or the contents of one of its textures.
+
 Where to look next: the character materials are the seven heavy fragment
 shaders in the dump (18-21 texture fetches, ~200 instructions, constants up
 to c255) - consistent with this game's subsurface-scattering skin shading.
-`shader_D47C83252CF2B765` is a representative one. The task is to work out
-which input to its final colour is arriving as zero.
+`shader_D47C83252CF2B765` is a representative one. The open question is which
+input to its final colour arrives as zero.
 
-One unverified observation worth testing first: the characters in the menu
-background appear to render skin correctly. If that background is real-time
-rather than a Bink video, then the low-detail models (`charlowres.rpf`) shade
-correctly while the high-detail ones (`characters.rpf`) do not, which would
-localise the bug to the high-detail skin material. Confirm which it is before
-relying on it - an earlier read of those same frames was mistaken for
-evidence that the bug was fixed.
+The SDK has a trace viewer (`src/graphics/trace_viewer.cpp`) that can step
+through a captured frame and show each draw's bound textures and constants,
+which would answer this directly - but it is only compiled into the library,
+with no executable target. Building one is probably the shortest path.
 
 `./trace.sh` dumps the translated shaders on the affected screen. Note that
 `--with-stream` renders a black screen, so shader dumping is the default.
@@ -234,6 +252,31 @@ Also outstanding:
 - The log fills with "Recovered stale physical page protection" - the guest
   memory write-protection path used for GPU invalidation. Worth checking
   whether it is costing frame time.
+
+## Reproducing the black skin
+
+`repro.sh` launches the game, drives it to the character-select screen and
+screenshots the character, so rendering changes can be A/B tested without a
+human at the keyboard:
+
+```sh
+./repro.sh /tmp/base.png                          # baseline
+./repro.sh /tmp/try.png --some_cvar=value         # with a change
+python3 tools/skinmeter.py /tmp/*_char.png        # compare numerically
+```
+
+`skinmeter.py` reports the face brightness plus a shirt reference. The shirt
+is the sanity check: if it is also near zero the run never reached the screen
+and the face number is meaningless. `repro.sh` verifies arrival itself and
+exits non-zero on failure, so a mis-navigated run is never mistaken for a
+rendering result.
+
+This needs `pyobjc-framework-Quartz`, and an interpreter that can see it -
+Homebrew's python3.10 here, not Xcode's python3. Set `TT_PYTHON` to override.
+The caller also needs Accessibility permission, since it posts synthetic key
+events. Note that AppleScript's `key code` sends a down/up pair back-to-back
+which the game's per-frame input polling misses entirely; `tools/sendkey.py`
+holds each key instead.
 
 ## Next steps
 

@@ -45,3 +45,26 @@ keybind_back = "Tab"
 keybind_start = "Return"
 
 fullscreen = false
+
+# --- Frame pacing -----------------------------------------------------------
+# With vsync off and no present limiter the guest vblank free-runs, so the game
+# advances its own clock faster than the console did - which is why the intro
+# video and menus play too fast. Pacing vblank fixes the speed, not the frame
+# rate.
+vsync = true
+vblank_host_clock_pacing = true
+video_mode_refresh_rate = 60.0
+
+# --- Shader compilation -----------------------------------------------------
+# The SDK disables async shader compilation on macOS (`!REX_PLATFORM_MAC`), so
+# every new pipeline is built on the frame that first needs it - the stutter
+# when entering a new screen. Turning it on trades that for brief pop-in while
+# pipelines warm up. If it introduces instability under MoltenVK, set it back
+# to false: the default is presumably deliberate.
+async_shader_compilation = true
+
+# Persist compiled shaders so subsequent runs skip the warm-up entirely.
+store_shaders = true
+
+# --- Diagnostics ------------------------------------------------------------
+show_fps_counter = true

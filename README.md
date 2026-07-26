@@ -45,6 +45,7 @@ XEX details: `XEX2`, image base `0x82000000`, 16 optional headers.
 config/     function boundary overrides fed to codegen
 game/       extracted disc files (gitignored; supply your own)
 run.sh      launcher (sets DYLD_LIBRARY_PATH, deploys the config)
+trace.sh    capture shaders + GPU trace for rendering bugs
 src/        host-side glue code
 third_party/rexglue-sdk   the SDK, as a git submodule
 tools/      xdvdfs_extract.py - extracts files from the disc image
@@ -155,15 +156,48 @@ the log, confirm the boundary by disassembling, add an entry, regenerate.
 
 ## Known gaps
 
+The game is playable into a match, but with three problems.
+
+**Everything runs too fast.** Fixed by pacing the guest vblank. With
+`vsync = false` and no present limiter the vblank free-runs, so the game
+advances its own clock faster than the console did - hence intro videos and
+menus playing at well above normal speed. `vsync = true` plus
+`vblank_host_clock_pacing = true` ties it to the display.
+
+**Stutter when entering a new screen.** The SDK disables async shader
+compilation on macOS (`async_shader_compilation` defaults to
+`!REX_PLATFORM_MAC`), so every new pipeline is compiled on the frame that
+first needs it. `tabletennis.toml` turns it back on, which trades the stall
+for brief pop-in while pipelines warm. If MoltenVK proves unstable with it,
+set it back to false - the default is presumably deliberate. `store_shaders`
+keeps compiled pipelines so later runs skip the warm-up.
+
+Note that the *overall* frame rate is limited by this being the emulated Xenos
+renderer. Skate 3's ~10x uplift on Apple Silicon came from replacing that with
+a native renderer, which is a from-scratch effort per game.
+
+**Character skin renders pure black.** Unresolved. Clothing textures are
+correct, and the 2D portrait thumbnails show skin fine, so it is specific to
+the 3D character skin material rather than texture loading in general. The
+in-game scene is also very dark overall, which may or may not share a cause.
+DXN and CTX1 (the 360 normal-map formats, a common suspect) do have load
+shaders in the Vulkan texture cache, so that is not obviously it.
+Use `./trace.sh` to capture shaders and a GPU trace on the affected screen.
+
+Also outstanding:
+
 - The guest `cache:` device is never mounted, so every `cache:\assets\...`
-  open fails. The game continues past it, but this is unresolved.
+  open fails. The game continues past it.
 - `__imp__Refresh` is a stub.
-- Nothing beyond the title screen has been exercised.
+- The log fills with "Recovered stale physical page protection" - the guest
+  memory write-protection path used for GPU invalidation. Worth checking
+  whether it is costing frame time.
 
 ## Next steps
 
-1. Play further and work through the unregistered-indirect-target aborts as
-   they appear.
-2. Mount a `cache:` device so the game's cache probing succeeds.
-3. Only once it plays properly, consider a native renderer. That is a separate
-   from-scratch effort per game; none of Skate 3's shader work transfers.
+1. Diagnose the black skin material from a `./trace.sh` capture.
+2. Keep working through unregistered-indirect-target aborts as they appear.
+3. Mount a `cache:` device so the game's cache probing succeeds.
+4. Only once it plays properly, consider a native renderer - that is where a
+   large frame-rate win would come from, and it is a from-scratch effort per
+   game; none of Skate 3's shader work transfers.

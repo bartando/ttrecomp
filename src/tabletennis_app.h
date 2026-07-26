@@ -6,6 +6,8 @@
 
 #include <rex/rex_app.h>
 
+#include "generated/default/tabletennis_init.h"
+
 class TabletennisApp : public rex::ReXApp {
  public:
   using rex::ReXApp::ReXApp;
@@ -13,7 +15,7 @@ class TabletennisApp : public rex::ReXApp {
   static std::unique_ptr<rex::ui::WindowedApp> Create(
       rex::ui::WindowedAppContext& ctx) {
     return std::unique_ptr<TabletennisApp>(new TabletennisApp(ctx, "tabletennis",
-        PPCImageConfig));
+        tabletennis_PPCImageConfig));
   }
 
   // Override virtual hooks for customization:

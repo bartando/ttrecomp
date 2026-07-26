@@ -1,0 +1,47 @@
+# Runtime config for the recompiled Table Tennis build.
+#
+# The app loads "<exe dir>/tabletennis.toml", so this file has to sit next to
+# the executable - copy it into out/build/<preset>/ after building.
+
+game_data_root = "game"
+
+# macOS always uses the SDL backend; real controllers work through it as-is.
+input_backend = "sdl"
+
+# Keyboard-to-controller emulation. Off by default in the SDK, so the title
+# screen ignores the keyboard until this is on.
+mnk_mode = true
+mnk_capture_mouse = false
+mnk_user_index = 0
+mnk_sensitivity = 1.0
+
+# Defaults, restated so the bindings are visible in one place.
+# Left stick   W / A / S / D          (press: Shift)
+# Right stick  mouse                  (press: MMB)
+# A B X Y      Space / C / E / F
+# Triggers     LT = RMB, RT = LMB
+# Shoulders    LB = Q,   RB = R
+# D-pad        arrow keys
+# Back/Start   Tab / Return
+keybind_a = "Space"
+keybind_b = "C"
+keybind_x = "E"
+keybind_y = "F"
+keybind_left_trigger = "RMB"
+keybind_right_trigger = "LMB"
+keybind_left_shoulder = "Q"
+keybind_right_shoulder = "R"
+keybind_lstick_up = "W"
+keybind_lstick_down = "S"
+keybind_lstick_left = "A"
+keybind_lstick_right = "D"
+keybind_lstick_press = "Shift"
+keybind_rstick_press = "MMB"
+keybind_dpad_up = "Up"
+keybind_dpad_down = "Down"
+keybind_dpad_left = "Left"
+keybind_dpad_right = "Right"
+keybind_back = "Tab"
+keybind_start = "Return"
+
+fullscreen = false

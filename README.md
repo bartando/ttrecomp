@@ -45,6 +45,7 @@ XEX details: `XEX2`, image base `0x82000000`, 16 optional headers.
 config/     function boundary overrides fed to codegen
 game/       extracted disc files (gitignored; supply your own)
 run.sh      launcher (sets DYLD_LIBRARY_PATH, deploys the config)
+autotest.sh drive the game with synthetic keys + screenshot (unreliable)
 trace.sh    capture shaders + GPU trace for rendering bugs
 src/        host-side glue code
 third_party/rexglue-sdk   the SDK, as a git submodule
@@ -172,17 +173,36 @@ for brief pop-in while pipelines warm. If MoltenVK proves unstable with it,
 set it back to false - the default is presumably deliberate. `store_shaders`
 keeps compiled pipelines so later runs skip the warm-up.
 
-Note that the *overall* frame rate is limited by this being the emulated Xenos
+**Rendering at 4x the pixels.** `resolution_scale` and
+`draw_resolution_scale_x/y` all default to 2 in the SDK, supersampling the
+1280x720 guest framebuffer to 2560x1440. The SDK itself warns that the path
+"is experimental and may not affect all titles correctly". `tabletennis.toml`
+sets them to 1. This is a large fragment-cost saving and is also a candidate
+explanation for the black skin - unverified, see above.
+
+Beyond that, the frame rate is limited by this being the emulated Xenos
 renderer. Skate 3's ~10x uplift on Apple Silicon came from replacing that with
 a native renderer, which is a from-scratch effort per game.
 
-**Character skin renders pure black.** Unresolved. Clothing textures are
-correct, and the 2D portrait thumbnails show skin fine, so it is specific to
-the 3D character skin material rather than texture loading in general. The
-in-game scene is also very dark overall, which may or may not share a cause.
-DXN and CTX1 (the 360 normal-map formats, a common suspect) do have load
-shaders in the Vulkan texture cache, so that is not obviously it.
-Use `./trace.sh` to capture shaders and a GPU trace on the affected screen.
+**Character skin renders pure black.** Still unresolved. Clothing, hair,
+shoes and the 2D portrait thumbnails all render correctly, so it is specific
+to the 3D character skin material rather than texture loading in general.
+
+Ruled out so far:
+
+- *Invalid texture fetch constants.* The Vulkan texture cache binds a pure
+  black fallback (`kInvalidTextureFetchFallbackColor`) for these, and
+  `gpu_allow_invalid_fetch_constants` defaults to true, so it happens
+  silently - a good fit for the symptom. But running with the cvar off
+  produces exactly one warning, on the title screen, and none on the
+  character-select screen. Not the cause.
+- *DXN / CTX1*, the 360 normal-map formats and the usual suspect: both have
+  load shaders in the Vulkan texture cache.
+
+Still to check: whether `draw_resolution_scale` is implicated (see below).
+
+`./trace.sh` dumps the translated shaders on the affected screen. Note that
+`--with-stream` renders a black screen, so shader dumping is the default.
 
 Also outstanding:
 

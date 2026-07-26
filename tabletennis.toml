@@ -66,5 +66,21 @@ async_shader_compilation = true
 # Persist compiled shaders so subsequent runs skip the warm-up entirely.
 store_shaders = true
 
+# --- Draw resolution --------------------------------------------------------
+# THE important setting. The SDK defaults these to 2, which supersamples the
+# 1280x720 guest framebuffer to 2560x1440 - 4x the pixels, and the SDK itself
+# warns the path "is experimental and may not affect all titles correctly".
+#
+# Setting all three to 1 renders at native guest resolution, which is a large
+# fragment-cost saving on its own and is worth having regardless.
+#
+# It is ALSO a candidate fix for the black character skin - but that is NOT
+# yet confirmed. The screenshots that looked like a fix were the attract
+# video, not real-time geometry. Verify on the Exhibition character-select
+# screen before believing it.
+resolution_scale = 1
+draw_resolution_scale_x = 1
+draw_resolution_scale_y = 1
+
 # --- Diagnostics ------------------------------------------------------------
 show_fps_counter = true

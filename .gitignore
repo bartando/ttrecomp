@@ -25,3 +25,7 @@ CMakeUserPresets.json
 # SDK build output
 /third_party/rexglue-sdk/out/
 /out/trace/
+
+# Python and shader scratch output
+__pycache__/
+/vert.spv

@@ -4,9 +4,14 @@
 
 #pragma once
 
+#include <rex/graphics/graphics_system.h>
+#include <rex/logging.h>
 #include <rex/rex_app.h>
+#include <rex/ui/keybinds.h>
 
 #include "generated/default/tabletennis_init.h"
+#include "native/tabletennis_native_renderer.h"
+#include "test/tabletennis_frontend_launch_test.h"
 
 class TabletennisApp : public rex::ReXApp {
  public:
@@ -18,12 +23,56 @@ class TabletennisApp : public rex::ReXApp {
         tabletennis_PPCImageConfig));
   }
 
+  void OnPostSetup() override {
+    tabletennis::native::Install();
+    tabletennis::test::InstallFrontendLaunchTest();
+    tabletennis::test::SetGameplayTraceRequester([this] {
+      if (!runtime() || !runtime()->graphics_system()) {
+        REXLOG_ERROR(
+            "Gameplay GPU frame trace requested before runtime setup");
+        return;
+      }
+      auto* graphics_system =
+          static_cast<rex::graphics::GraphicsSystem*>(
+              runtime()->graphics_system());
+      graphics_system->RequestFrameTrace();
+      REXLOG_INFO(
+          "Gameplay GPU frame trace requested from verified title marker");
+    });
+  }
+
+  void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
+    (void)drawer;
+    rex::ui::RegisterBind(
+        "bind_tabletennis_frame_trace", "F7", "Capture one GPU frame", [this] {
+          if (!runtime() || !runtime()->graphics_system()) {
+            REXLOG_WARN("GPU frame trace requested before the runtime was ready");
+            return;
+          }
+          auto* graphics_system =
+              static_cast<rex::graphics::GraphicsSystem*>(runtime()->graphics_system());
+          graphics_system->RequestFrameTrace();
+          REXLOG_INFO("GPU frame trace requested; capturing the next complete frame");
+        });
+    rex::ui::RegisterBind(
+        "bind_tabletennis_native_renderer", "F5",
+        "Toggle native/emulated renderer", [] {
+          tabletennis::native::Toggle();
+        });
+  }
+
+  void OnShutdown() override {
+    tabletennis::test::SetGameplayTraceRequester({});
+    tabletennis::test::ShutdownFrontendLaunchTest();
+    tabletennis::native::Shutdown();
+    rex::ui::UnregisterBind("bind_tabletennis_native_renderer");
+    rex::ui::UnregisterBind("bind_tabletennis_frame_trace");
+  }
+
   // Override virtual hooks for customization:
   // void OnPostInitLogging() override {}
   // void OnPreSetup(rex::RuntimeConfig& config) override {}
   // void OnLoadXexImage(std::string& xex_image) override {}
   // void OnPostSetup() override {}
-  // void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {}
-  // void OnShutdown() override {}
   // void OnConfigurePaths(rex::PathConfig& paths) override {}
 };

@@ -82,5 +82,13 @@ resolution_scale = 1
 draw_resolution_scale_x = 1
 draw_resolution_scale_y = 1
 
+# macOS protects guest memory in 16 KiB host pages while many Xenos resources
+# occupy smaller disjoint byte ranges. A GPU write beside a watched texture
+# used to invalidate and reconvert that texture even when the exact byte
+# envelopes did not overlap. Table Tennis telemetry measured 67-83 such
+# page-only collisions per 256 GPU writes; exact filtering improved the live
+# gameplay baseline without changing CPU/global invalidation semantics.
+shared_memory_filter_gpu_page_only_watches = true
+
 # --- Diagnostics ------------------------------------------------------------
 show_fps_counter = true

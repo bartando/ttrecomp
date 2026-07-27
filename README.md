@@ -4,9 +4,9 @@ An in-progress native recompilation of the Xbox 360 version of
 *Rockstar Games Presents Table Tennis*, built on the
 [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk).
 
-**Status: it boots.** The game reaches its title screen and renders through
-Vulkan (MoltenVK) on Apple Silicon, with keyboard input working. It has not
-been played past the title screen, so most of the game is untested.
+**Status: it runs into a match.** Menus, character selection, loading, and the
+arena render through Vulkan (MoltenVK) on Apple Silicon, with keyboard and
+controller input available. Full-match compatibility is still untested.
 
 This project contains no retail game code or assets. To build or run it you
 must supply files from your own legally obtained copy of the game.
@@ -47,6 +47,7 @@ game/       extracted disc files (gitignored; supply your own)
 run.sh      launcher (sets DYLD_LIBRARY_PATH, deploys the config)
 repro.sh    drive to the character-select screen and screenshot it
 trace.sh    capture shaders + GPU trace for rendering bugs
+trace-viewer.sh  inspect or dump a captured GPU frame
 src/        host-side glue code
 third_party/rexglue-sdk   the SDK, as a git submodule
 tools/      xdvdfs_extract.py - extracts files from the disc image
@@ -178,71 +179,23 @@ keeps compiled pipelines so later runs skip the warm-up.
 `draw_resolution_scale_x/y` all default to 2 in the SDK, supersampling the
 1280x720 guest framebuffer to 2560x1440. The SDK itself warns that the path
 "is experimental and may not affect all titles correctly". `tabletennis.toml`
-sets them to 1. This is a large fragment-cost saving and is also a candidate
-explanation for the black skin - unverified, see above.
+sets them to 1. This is a large fragment-cost saving.
 
 Beyond that, the frame rate is limited by this being the emulated Xenos
 renderer. Skate 3's ~10x uplift on Apple Silicon came from replacing that with
 a native renderer, which is a from-scratch effort per game.
 
-**Character skin renders pure black.** Still unresolved, and now the main
-open bug. Clothing, hair, shoes and the 2D portrait thumbnails all render
-correctly; eyes remain faintly visible. So the skin material's colour output
-is going to zero while the rest of the character is fine.
+**Black character skin is fixed.** The Vulkan SPIR-V translator read the
+texture result exponent adjustment from fetch-constant dword 4. Xenos stores
+that field in dword 3, which the SDK's D3D12 path already used correctly. For
+the skin material, the unrelated bits in dword 4 decoded as `-8`, multiplying
+otherwise-correct skin texels by `2^-8` and making them effectively black.
+The Vulkan path now reads dword 3 too.
 
-Ruled out by experiment:
-
-- *Draw resolution scaling.* Was the leading theory - the SDK supersamples 2x
-  by default and warns the path is experimental. Rendering at native
-  resolution changes nothing; skin is still black.
-- *Invalid texture fetch constants.* The Vulkan texture cache binds a pure
-  black fallback (`kInvalidTextureFetchFallbackColor`) for these, and
-  `gpu_allow_invalid_fetch_constants` defaults to true, so it happens
-  silently - a very good fit for the symptom. But with the cvar off exactly
-  one warning fires, on the title screen, and none on character select.
-- *Shader translation failures.* None are logged.
-- *Exotic shader instructions.* The character shaders use only `tfetch2D`
-  and a little `tfetchCube`; nothing unusual to mistranslate.
-- *DXN / CTX1*, the 360 normal-map formats: both have load shaders in the
-  Vulkan texture cache.
-- *The unmounted `cache:` device.* Deliberate - `runtime.cpp` explicitly
-  declines to register it, because games handle "device not found" cleanly
-  but not device errors.
-
-Also ruled out, each measured on the repro screen (see below):
-
-| Change | Face brightness |
-| --- | --- |
-| baseline | 3.6 |
-| `native_2x_msaa=false` | 3.6 |
-| `vulkan_dynamic_rendering=false` | 3.7 |
-| `readback_resolve=full`, `vulkan_readback_resolve=true` | 0.0 (worse) |
-| native draw resolution | 3.6 |
-
-Correct skin would read as a mid-tone; the shirt reference reads ~23 on the
-same frames, so the measurement is sound.
-
-What the per-frame GPU summary says (run with
-`--vulkan_debug_log_frame_summaries_remaining=100000`): the character-select
-frame issues 1765 draws, 1573 of them textured, with `placeholder=0` and
-`no_effect=0`. So every pipeline is compiled and the skin draws really are
-executing and sampling textures - they simply shade to black. That rules out
-a missing or still-compiling pipeline, and points at either the skin
-material's shader math or the contents of one of its textures.
-
-Where to look next: the character materials are the seven heavy fragment
-shaders in the dump (18-21 texture fetches, ~200 instructions, constants up
-to c255) - consistent with this game's subsurface-scattering skin shading.
-`shader_D47C83252CF2B765` is a representative one. The open question is which
-input to its final colour arrives as zero.
-
-The SDK has a trace viewer (`src/graphics/trace_viewer.cpp`) that can step
-through a captured frame and show each draw's bound textures and constants,
-which would answer this directly - but it is only compiled into the library,
-with no executable target. Building one is probably the shortest path.
-
-`./trace.sh` dumps the translated shaders on the affected screen. Note that
-`--with-stream` renders a black screen, so shader dumping is the default.
+The GPU tracer made this deterministic: shader `D47C83252CF2B765` returned a
+correct face texture sample, then lost almost all brightness while applying
+the result exponent. This ruled out texture upload, UVs, lighting, normal
+maps, descriptor binding, and LOD before changing production code.
 
 Also outstanding:
 
@@ -253,15 +206,18 @@ Also outstanding:
   memory write-protection path used for GPU invalidation. Worth checking
   whether it is costing frame time.
 
-## Reproducing the black skin
+## Rendering regression test
 
 `repro.sh` launches the game, drives it to the character-select screen and
-screenshots the character, so rendering changes can be A/B tested without a
-human at the keyboard:
+screenshots the character, so the fixed rendering can be regression-tested
+without a human at the keyboard:
 
 ```sh
 ./repro.sh /tmp/base.png                          # baseline
 ./repro.sh /tmp/try.png --some_cvar=value         # with a change
+./repro.sh /tmp/match.png --enter-gameplay        # continue through loading
+./repro.sh /tmp/test.png --test-path               # game-side fast path, verified match
+./run.sh --skip-menu                               # normal interactive launch into a match
 python3 tools/skinmeter.py /tmp/*_char.png        # compare numerically
 ```
 
@@ -278,11 +234,105 @@ events. Note that AppleScript's `key code` sends a down/up pair back-to-back
 which the game's per-frame input polling misses entirely; `tools/sendkey.py`
 holds each key instead.
 
+## GPU frame tracer
+
+Press F7 in the game, or let the repro script do it:
+
+```sh
+./repro.sh /tmp/trace.png --capture-trace
+```
+
+Captured frames are written to `out/trace/frames`. Open the interactive viewer
+or produce a textual/texture/frame dump:
+
+```sh
+./trace-viewer.sh out/trace/frames/<frame>.xtr
+
+./trace-viewer.sh out/trace/frames/<frame>.xtr \
+  --trace_dump=true \
+  --trace_dump_shader=D47C83252CF2B765 \
+  --trace_dump_textures=/tmp/tabletennis-textures \
+  --trace_dump_frame=/tmp/tabletennis-frame.ppm
+```
+
+The viewer also supports targeted Vulkan shader output/register/fetch probes.
+Those are diagnostic restart-time cvars; run the executable with `--help` for
+the current names and modes.
+
+## Native renderer observer
+
+Native-renderer work follows Skate 3's capture-first method: hook the game's
+render submission, decode the guest structures it actually uses, compare the
+result with the emulated frame, and only then serve one verified piece at a
+time. The native path does not contain a replacement scene.
+
+The geometry/camera proof is working, and the first real textured pass is
+implemented:
+
+- `sub_82152E80` captures the completed camera constant context.
+- Indexed draw submission captures a real table/net mesh: 948 vertices and
+  4,680 indices.
+- The mesh and camera are copied into immutable host-side snapshots.
+- An optional post-process observer draws that real mesh over the untouched
+  emulated frame. The position-only proof aligned with the original net across
+  moving gameplay cameras, validating the mesh decode, transforms, and matrix
+  convention together.
+- `grmShaderFx::DrawModelGeometry` at `0x820EFB30` ties the mesh to its real
+  shader object, model, geometry index, LOD, and alternate pass.
+- `rage_fx_ApplyPass` at `0x82158C48` captures the two live program pairs and
+  their render/sampler command records. The observer has verified every
+  pointer and callback with zero guest-read failures.
+- The type-6 Fx resource setter at `0x8215A830` caches material-build bindings
+  by owner shader and joins them to the later proven draw. The table/net
+  material currently exposes three real resource objects through handles
+  `0x000C0004`, `0x00080002`, and `0x00100006`.
+- The resource vtable `+0x50` unwrappers expose each guest D3D texture. Stable
+  double-reads locate Table Tennis' six-dword Xenos fetch block at binding
+  `+0x10` and decode the three textures as 256x256 DXT1, 512x512 DXT5, and
+  512x256 DXT5, including tiled base/mip addresses.
+- The visible 4,680-index net pass uses the two DXT5 resources, UV0/UV1, and
+  COLOR0 from the game's 96-byte vertex format. The observer untile-copies
+  those payloads, uploads them as BC3, and ports the captured two-texture
+  blend and opacity calculation.
+- Vulkan shader generation asserts the NRHI descriptor contract before
+  writing the embedded SPIR-V: constants at set 0/binding 0, samplers at set
+  0/bindings 1-2, and textures at set 1/bindings 0-1. This check exists
+  because the initial auto-mapped SPIR-V collided all three resource classes
+  in set 0 and caused an Apple GPU page fault.
+
+Run the observer overlay with:
+
+```sh
+./run.sh --skip-menu --tabletennis_native_observer_overlay=true
+```
+
+The overlay is off by default and is diagnostic only; it does not suppress the
+guest renderer or improve the current frame rate.
+
+Ghidra 12.1.2 plus XEXLoaderWV is also part of the workflow. A headless import
+of `game/default.xex` lives in the gitignored `out/ghidra-projects` directory.
+Static analysis has confirmed the live render chain and is now being used to
+recover material and texture bindings rather than guessing guest layouts from
+draw data alone. The project database contains named RTTI/vtables and partial
+layouts for `grcTextureReferenceBase`, `grcTextureReference`, and
+`grcTextureXenon`, including the validated fetch block at binding `+0x10`.
+
+Detailed material telemetry is opt-in:
+
+```sh
+./run.sh --skip-menu --tabletennis_native_material_log_interval=30
+```
+
 ## Next steps
 
-1. Diagnose the black skin material from a `./trace.sh` capture.
+1. Verify a full playable rally and then a complete match with a controller.
 2. Keep working through unregistered-indirect-target aborts as they appear.
-3. Mount a `cache:` device so the game's cache probing succeeds.
-4. Only once it plays properly, consider a native renderer - that is where a
-   large frame-rate win would come from, and it is a from-scratch effort per
-   game; none of Skate 3's shader work transfers.
+3. Reboot after the Apple GPU fault, then validate the corrected descriptor
+   mapping and first verified camera on the textured net observer.
+4. Widen capture from the proven net to the remaining table and arena meshes.
+5. Decode player meshes, skinning, transforms, and materials.
+6. Publish complete immutable scene snapshots before enabling any native
+   takeover. The emulated renderer remains the authority until each field has
+   passed an observer comparison.
+7. Investigate the repeated stale physical-page-protection recovery warnings
+   and mount a `cache:` device.

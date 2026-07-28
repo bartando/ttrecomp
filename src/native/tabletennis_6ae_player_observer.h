@@ -22,6 +22,8 @@ struct Player6AEFrameSnapshot {
   uint32_t guest_read_failures = 0;
   uint32_t payload_copy_failures = 0;
   uint32_t texture_capture_failures = 0;
+  uint32_t sampler_contract_failures = 0;
+  uint32_t shared_resource_capture_failures = 0;
   uint32_t backend_tile_blocks_matched = 0;
   uint32_t backend_sequence_mismatches = 0;
   std::vector<Player6AEDrawSnapshot> draws;
@@ -32,7 +34,10 @@ struct Player6AEFrameSnapshot {
         admitted_draw_count != draws.size() || dropped_draw_count != 0 ||
         guest_read_failures != 0 || payload_copy_failures != 0 ||
         texture_capture_failures != 0 ||
-        backend_tile_blocks_matched != 3) {
+        sampler_contract_failures != 0 ||
+        shared_resource_capture_failures != 0 ||
+        backend_tile_blocks_matched != 3 ||
+        backend_sequence_mismatches != 0) {
       return false;
     }
     for (const Player6AEDrawSnapshot& draw : draws) {
@@ -56,6 +61,8 @@ struct Player6AEObserverTelemetry {
   uint64_t backend_events_dropped = 0;
   uint64_t backend_tile_blocks_matched = 0;
   uint64_t backend_sequence_mismatches = 0;
+  uint64_t sampler_contract_failures = 0;
+  uint64_t shared_resource_capture_failures = 0;
   uint64_t latest_title_sequence = 0;
   uint64_t latest_published_sequence = 0;
   uint32_t pending_frames = 0;

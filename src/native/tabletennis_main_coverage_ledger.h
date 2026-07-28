@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -15,10 +16,13 @@ struct CrowdFrameSnapshot;
 struct D47PlayerFrameSnapshot;
 struct NetBB903FrameSnapshot;
 struct Player6AEFrameSnapshot;
+struct PlayerA406FrameSnapshot;
+struct PlayerBBB5FrameSnapshot;
 struct PlayerSkinFrameSnapshot;
 struct Venue14DFrameSnapshot;
 struct VenueE33FrameSnapshot;
 struct VenueFullFamilyFrame;
+struct Venue9EFrameSnapshot;
 
 // Value-only identity shared by the title's ordered DrawIndexedPrimitive
 // catalog and the translated backend. No guest pointer or live resource is
@@ -40,7 +44,18 @@ struct MainCoverageDrawIdentity {
 // snapshot stays independent of backend-owned objects.
 struct MainCoverageBackendContract {
   uint32_t backend = 0;
+  uint32_t host_vertex_or_index_count = 0;
+  uint32_t primary_vertex_physical_address = 0;
+  uint32_t primary_vertex_byte_count = 0;
+  uint32_t primary_vertex_endian = 0;
   uint32_t render_pass_key = 0;
+  uint32_t rb_color_info_0 = 0;
+  uint32_t rb_depth_info = 0;
+  uint32_t rb_surface_info = 0;
+  uint32_t rb_modecontrol = 0;
+  uint32_t color_edram_base = 0;
+  uint32_t depth_edram_base = 0;
+  uint32_t edram_mode = 0;
   uint32_t surface_pitch = 0;
   uint32_t normalized_depth_control = 0;
   uint32_t normalized_color_mask = 0;
@@ -54,7 +69,10 @@ struct MainCoverageBackendContract {
   uint32_t stencil_attachment_format = 0;
   uint32_t sample_count = 0;
   uint64_t sample_mask = 0;
+  bool indexed = false;
+  bool primary_vertex_fetch_valid = false;
   bool primitive_restart_enabled = false;
+  bool render_target_state_valid = false;
   bool rasterizer_mode_control_valid = false;
   bool draw_state_contract_valid = false;
   bool attachment_contract_valid = false;
@@ -73,6 +91,9 @@ enum class MainCoverageAssignmentFamily : uint8_t {
   kPlayerD47,
   kPlayer6AE,
   kNetBB903,
+  kVenue9E,
+  kPlayerA406,
+  kPlayerBBB5,
 };
 
 enum class MainCoverageAssignmentProof : uint8_t {
@@ -127,6 +148,50 @@ enum class MainCoverageBackendOnlyRegion : uint8_t {
   kSuffix,
 };
 
+enum class MainCoverageBackendOnlyClassification : uint8_t {
+  kUnclassified = 0,
+  // Exact auto-indexed Xenos rectangle-list whose vf95 payload is
+  // float3-position/float4-color and whose pixel shader forwards that color to
+  // MAIN. RexGlue expands the three guest control vertices into a four-index
+  // host triangle strip. This is real output work outside the title's indexed
+  // DrawIndexedPrimitive catalog.
+  kVertexColorRectangleOutput,
+};
+
+struct MainCoverageVertexColorRectangleProof {
+  static constexpr size_t kGuestControlVertexCount = 3;
+  static constexpr size_t kVertexStride = 28;
+
+  uint32_t vertex_physical_address = 0;
+  uint32_t vertex_byte_count = 0;
+  uint32_t vertex_endian = 0;
+  uint64_t payload_fingerprint = 0;
+  // Exact value-owned guest bytes after stable double-read. This is retained
+  // for translated replay; decoded floats alone would lose the deliberate
+  // 0xFFFFFFFF NaN color components.
+  std::array<uint8_t, kGuestControlVertexCount * kVertexStride> payload_bytes{};
+  std::array<float, kGuestControlVertexCount * 3> positions{};
+  std::array<float, kGuestControlVertexCount * 4> colors{};
+  // Retained alongside the decoded values because the observed green
+  // components are the deliberate Xenos bit pattern 0xFFFFFFFF (negative
+  // quiet NaN). A future replay must feed those guest bits through the shader
+  // and render-target conversion rather than sanitize them.
+  std::array<uint32_t, kGuestControlVertexCount * 4> color_bits{};
+  bool payload_stable = false;
+  bool positions_finite = false;
+  bool rectangle_geometry_valid = false;
+  bool color_payload_contract_valid = false;
+  bool color_write_enabled = false;
+
+  bool valid() const {
+    return vertex_physical_address != 0 &&
+           vertex_byte_count >= kGuestControlVertexCount * kVertexStride &&
+           vertex_endian == 2 && payload_fingerprint != 0 && payload_stable &&
+           positions_finite && rectangle_geometry_valid &&
+           color_payload_contract_valid && color_write_enabled;
+  }
+};
+
 // A MAIN callback not joined to a title ordinal. This includes callbacks
 // outside the selected three-tile core and unmatched offsets repeated inside
 // every tile. They remain uncovered backend work.
@@ -137,6 +202,9 @@ struct MainCoverageBackendOnlyEvent {
   uint64_t pixel_shader_hash = 0;
   MainCoverageBackendContract backend{};
   MainCoverageBackendOnlyRegion region = MainCoverageBackendOnlyRegion::kPrefix;
+  MainCoverageBackendOnlyClassification classification =
+      MainCoverageBackendOnlyClassification::kUnclassified;
+  MainCoverageVertexColorRectangleProof vertex_color_rectangle{};
   uint32_t tile_ordinal = 0;
   uint32_t tile_event_offset = 0;
 };
@@ -235,6 +303,13 @@ bool MainCoverageLedgerEnabled();
 void ObserveMainCoverageBackendDraw(
     const rex::graphics::NativeGuestDrawContext &context);
 
+// Standalone phase-zero capture. This has no ledger dependency: callers get a
+// value-owned proof only for the exact persistent MAIN rectangle, or an
+// invalid proof. It never selects a replacement or mutates GPU state.
+MainCoverageVertexColorRectangleProof
+CaptureMainVertexColorRectangleProof(
+    const rex::graphics::NativeGuestDrawContext &context);
+
 // Family publishers feed these overloads at the moment an immutable snapshot
 // becomes visible. The sequence-keyed archive prevents a short-lived delayed
 // snapshot from being missed between title swaps.
@@ -254,6 +329,12 @@ void ObserveMainCoverageFamilyFrame(
     std::shared_ptr<const Player6AEFrameSnapshot> frame);
 void ObserveMainCoverageFamilyFrame(
     std::shared_ptr<const NetBB903FrameSnapshot> frame);
+void ObserveMainCoverageFamilyFrame(
+    std::shared_ptr<const Venue9EFrameSnapshot> frame);
+void ObserveMainCoverageFamilyFrame(
+    std::shared_ptr<const PlayerA406FrameSnapshot> frame);
+void ObserveMainCoverageFamilyFrame(
+    std::shared_ptr<const PlayerBBB5FrameSnapshot> frame);
 
 // Called after the ordered scene catalog and all family observers publish at
 // title Swap. Backend frame N is finalized only after a newer authoritative

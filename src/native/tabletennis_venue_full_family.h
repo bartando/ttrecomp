@@ -54,5 +54,9 @@ void ObserveVenueFullFamilyDraw(const SceneCatalogDrawOccurrence &source,
 void VenueFullFamilyFrameEnd();
 
 std::shared_ptr<const VenueFullFamilyFrame> LatestVenueFullFamilyFrame();
+// Exact immutable title frame retained for asynchronous backend joins. History
+// is deliberately small and is cleared whenever capture is disabled.
+std::shared_ptr<const VenueFullFamilyFrame>
+VenueFullFamilyFrameForSequence(uint64_t sequence);
 
 } // namespace tabletennis::native

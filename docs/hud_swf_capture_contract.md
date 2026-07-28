@@ -99,3 +99,66 @@ texture_binds=... complete=... observer_only=true guest_suppressed=false
 payload capture, and readiness reports `hud_capture_valid`. `hud_complete`
 intentionally remains false until exact blend/depth/raster/scissor state and
 native replay are independently verified.
+
+## Translated-backend observer and ordered join
+
+`tabletennis_hud_swf_backend_observer` consumes both the pre-gate draw census
+and the normal draw-replacement matcher callback stream without returning a
+route. It retains only events with the exact gameplay HUD shader pair:
+
+```text
+VS F0B85512865B6E5E / PS 391847433E1601A9
+```
+
+Events are bucketed by the authoritative backend frame sequence. The pre-gate
+`NativeGuestDrawEligibilityContext` observes every translated draw and retains
+its submitted/host counts, primitive topology, processed-index shape, and
+eligibility result. Ordinary auto-indexed triangle lists and strips do not
+need a host index buffer, so they correctly do not reach the selective
+replacement matcher.
+
+Authoritative late matcher callbacks are retained separately. They copy
+blend/depth/color/raster/restart state, render-pass key, raw and decoded EDRAM
+target identity, and the host attachment/sample contract, but cover only
+converted primitive draws. Their partial coverage is never presented as a
+full replay-state proof.
+
+The reference trace contains one separate 88-vertex quad-list draw from this
+shader family followed later by the gameplay SWF block. The gameplay block is
+exactly 55 draws and 266 submitted vertices:
+
+- 7 six-vertex triangle lists;
+- 16 six-vertex triangle fans;
+- 32 four-vertex triangle strips.
+
+The `batch_kind` passed to `sub_82152A78` indexes the verified big-endian table
+at `0x825D4C64`. Kinds `0..6` decode to Xenos primitives
+`{1, 2, 3, 4, 6, 5, 13}`. At backend-frame close the observer finds both the
+earliest and latest ordered mappings of the immutable title
+`{decoded primitive, vertex count}` vector into the complete pre-gate family
+vector. A frame is accepted only when those mappings are identical. This
+proves a unique 55-draw join and excludes the 88-vertex prefix.
+
+On the current Vulkan backend, the triangle fans are converted to a host
+triangle-list index buffer (`6` guest vertices become `12` host indices), and
+the 88-vertex quad list is converted too. Those 17 draws reach the matcher.
+The remaining 39 auto-indexed list/strip draws do not. One backend draw never
+consumes multiple SWF batches.
+
+The published `HudSwfBackendFrameSnapshot` owns the title snapshot, one
+pre-gate identity per joined batch, and the 17 available late contracts.
+`observer_complete()` proves the exact 55/266 identity and topology join plus
+the expected partial late-state coverage. It does not claim complete live
+state and is not serving approval:
+`replay_ready()` is hard-wired false, no draw is suppressed, and no GPU command
+is recorded.
+
+The remaining replay inputs are explicit:
+
+- vertex constants `c12..c15`;
+- pixel constant `c110`;
+- effective slot-0 sampler state;
+- effective viewport and scissor;
+- the native MAIN resolve / COMP / HUD target handoff.
+
+No value for those inputs is inferred from the old trace.

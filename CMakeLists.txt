@@ -25,19 +25,40 @@ set(TABLETENNIS_SOURCES
     src/native/tabletennis_draw_constants.cpp
     src/native/tabletennis_draw_replacer_dispatcher.cpp
     src/native/tabletennis_6ae_player_observer.cpp
+    src/native/tabletennis_6ae_player_renderer.cpp
     src/native/tabletennis_6ae_player_snapshot.cpp
+    src/native/tabletennis_6ae_texture_decoder.cpp
     src/native/tabletennis_d47_player_observer.cpp
     src/native/tabletennis_d47_player_snapshot.cpp
+    src/native/tabletennis_player_a406_observer.cpp
+    src/native/tabletennis_player_a406_snapshot.cpp
+    src/native/tabletennis_player_bbb5_observer.cpp
+    src/native/tabletennis_player_bbb5_snapshot.cpp
     src/native/tabletennis_frame_scene.cpp
     src/native/tabletennis_fps_telemetry.cpp
+    src/native/tabletennis_hud_swf_backend_observer.cpp
     src/native/tabletennis_hud_swf_capture.cpp
+    src/native/tabletennis_late_comp_first_slice.cpp
+    src/native/tabletennis_late_phase_ledger.cpp
+    src/native/tabletennis_logical_draw_replay_packet.cpp
+    src/native/tabletennis_ps328_logical_replay_join.cpp
+    src/native/tabletennis_phase0_rectangle_replay.cpp
+    src/native/tabletennis_phase0_rectangle_readback.cpp
+    src/native/tabletennis_translated_shader_artifact_store.cpp
+    src/native/tabletennis_transition_state_observer.cpp
     src/native/tabletennis_material_observer.cpp
     src/native/tabletennis_main_coverage_ledger.cpp
+    src/native/tabletennis_ps328_tile_invariance.cpp
+    src/native/tabletennis_generic_main_private_batch_replay.cpp
+    src/native/tabletennis_guarded_venue_private_batch_replay.cpp
+    src/native/tabletennis_guarded_venue_capture_retirement.cpp
     src/native/tabletennis_model_material_tokens.cpp
     src/native/tabletennis_mesh_payload_probe.cpp
     src/native/tabletennis_mesh_snapshot.cpp
     src/native/tabletennis_net_bb903_observer.cpp
     src/native/tabletennis_native_scene_compositor.cpp
+    src/native/tabletennis_offscreen_target_owner.cpp
+    src/native/tabletennis_exact_main_targets.cpp
     src/native/tabletennis_native_scene_pass.cpp
     src/native/tabletennis_native_scene_targets.cpp
     src/native/tabletennis_native_scene_transaction.cpp
@@ -47,7 +68,10 @@ set(TABLETENNIS_SOURCES
     src/native/tabletennis_venue_14d_renderer.cpp
     src/native/tabletennis_venue_14d_snapshot.cpp
     src/native/tabletennis_venue_526a_observer.cpp
+    src/native/tabletennis_venue_9e_observer.cpp
+    src/native/tabletennis_venue_9e_snapshot.cpp
     src/native/tabletennis_venue_e33_observer.cpp
+    src/native/tabletennis_venue_e33_renderer.cpp
     src/native/tabletennis_venue_e33_snapshot.cpp
     src/native/tabletennis_venue_full_family.cpp
     src/native/tabletennis_venue_observer_renderer.cpp

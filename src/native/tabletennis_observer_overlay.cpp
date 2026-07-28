@@ -1,21 +1,26 @@
 #include "native/tabletennis_observer_overlay.h"
 
 #include "native/shaders/tabletennis_observer_overlay_spirv.h"
+#include "native/tabletennis_6ae_player_observer.h"
+#include "native/tabletennis_6ae_player_renderer.h"
 #include "native/tabletennis_crowd_observer.h"
 #include "native/tabletennis_crowd_observer_renderer.h"
 #include "native/tabletennis_crowd_replacement_prewarm.h"
+#include "native/tabletennis_exact_main_targets.h"
 #include "native/tabletennis_mesh_snapshot.h"
 #include "native/tabletennis_native_capture.h"
-#include "native/tabletennis_native_scene_transaction.h"
 #include "native/tabletennis_native_scene_targets.h"
+#include "native/tabletennis_native_scene_transaction.h"
 #include "native/tabletennis_player_observer_renderer.h"
 #include "native/tabletennis_player_replacement_candidates.h"
 #include "native/tabletennis_player_skin_snapshot.h"
 #include "native/tabletennis_texture_snapshot.h"
 #include "native/tabletennis_venue_14d_observer.h"
 #include "native/tabletennis_venue_14d_renderer.h"
-#include "native/tabletennis_venue_observer_renderer.h"
+#include "native/tabletennis_venue_e33_observer.h"
+#include "native/tabletennis_venue_e33_renderer.h"
 #include "native/tabletennis_venue_full_family.h"
+#include "native/tabletennis_venue_observer_renderer.h"
 #include "native/tabletennis_venue_snapshot.h"
 
 #include <algorithm>
@@ -51,8 +56,8 @@ using rex::graphics::NativeGuestOutputRenderContext;
 namespace nrhi = rex::graphics::nrhi;
 namespace xenos = rex::graphics::xenos;
 
-constexpr std::array<uint32_t, 2> kVisibleTextureHandles = {
-    0x00080002, 0x00100006};
+constexpr std::array<uint32_t, 2> kVisibleTextureHandles = {0x00080002,
+                                                            0x00100006};
 
 struct OverlayVertex {
   std::array<float, 3> position;
@@ -84,8 +89,7 @@ struct OverlayResources {
   std::shared_ptr<const TableMeshSnapshot> uploaded_mesh;
   std::array<std::shared_ptr<const TableTextureSnapshot>, 2>
       uploaded_textures{};
-  std::vector<std::shared_ptr<const VenueMeshSnapshot>>
-      uploaded_venue_meshes;
+  std::vector<std::shared_ptr<const VenueMeshSnapshot>> uploaded_venue_meshes;
   std::vector<VenueGpuDrawRange> venue_draw_ranges;
   uint32_t venue_vertex_bytes = 0;
   uint32_t venue_index_bytes = 0;
@@ -104,8 +108,7 @@ void ReleaseGpuResources() {
     g_resources.device->DestroyDeferred(g_resources.venue_vertex_buffer);
     g_resources.device->DestroyDeferred(g_resources.venue_index_buffer);
     for (size_t slot = 0; slot < g_resources.textures.size(); ++slot) {
-      g_resources.device->DestroyDeferred(
-          g_resources.texture_views[slot]);
+      g_resources.device->DestroyDeferred(g_resources.texture_views[slot]);
       g_resources.device->DestroyDeferred(g_resources.textures[slot]);
     }
   }
@@ -118,8 +121,7 @@ bool EnsureDevice(const NativeGuestOutputRenderContext& context) {
   if (context.device == nullptr) {
     return false;
   }
-  if (g_resources.device != nullptr &&
-      g_resources.device != context.device) {
+  if (g_resources.device != nullptr && g_resources.device != context.device) {
     ReleaseGpuResources();
   }
   g_resources.device = context.device;
@@ -140,10 +142,10 @@ bool EnsurePipeline(const NativeGuestOutputRenderContext& context) {
     layout.params[1] = {nrhi::BindingParamKind::kTextureTable, 0, 2,
                         nrhi::Visibility::kPixel};
     layout.static_sampler_count = 2;
-    layout.static_samplers[0] = {
-        0, nrhi::Filter::kLinear, nrhi::AddressMode::kWrap, 1};
-    layout.static_samplers[1] = {
-        1, nrhi::Filter::kLinear, nrhi::AddressMode::kWrap, 1};
+    layout.static_samplers[0] = {0, nrhi::Filter::kLinear,
+                                 nrhi::AddressMode::kWrap, 1};
+    layout.static_samplers[1] = {1, nrhi::Filter::kLinear,
+                                 nrhi::AddressMode::kWrap, 1};
     layout.allow_input_layout = true;
     g_resources.layout = device->CreateBindingLayout(layout);
     if (g_resources.layout == nullptr) {
@@ -201,8 +203,7 @@ bool EnsurePipeline(const NativeGuestOutputRenderContext& context) {
   pipeline.vs = vertex_shader;
   pipeline.ps = pixel_shader;
   pipeline.input_elements = kVertexInputs.data();
-  pipeline.input_element_count =
-      static_cast<uint32_t>(kVertexInputs.size());
+  pipeline.input_element_count = static_cast<uint32_t>(kVertexInputs.size());
   pipeline.vertex_stride = sizeof(OverlayVertex);
   pipeline.cull = nrhi::CullMode::kNone;
   pipeline.depth_clip = true;
@@ -237,9 +238,8 @@ nrhi::Buffer* CreateUploadBuffer(nrhi::Device* device, size_t size) {
   return device->CreateBuffer(description);
 }
 
-bool EnsureMeshBuffers(
-    const NativeGuestOutputRenderContext& context,
-    const std::shared_ptr<const TableMeshSnapshot>& mesh) {
+bool EnsureMeshBuffers(const NativeGuestOutputRenderContext& context,
+                       const std::shared_ptr<const TableMeshSnapshot>& mesh) {
   if (mesh == nullptr || !mesh->valid()) {
     return false;
   }
@@ -250,19 +250,15 @@ bool EnsureMeshBuffers(
   }
 
   nrhi::Device* const device = context.device;
-  const size_t vertex_bytes =
-      mesh->positions.size() * sizeof(OverlayVertex);
+  const size_t vertex_bytes = mesh->positions.size() * sizeof(OverlayVertex);
   const size_t index_bytes =
       mesh->indices.size() * sizeof(mesh->indices.front());
-  nrhi::Buffer* const vertex_buffer =
-      CreateUploadBuffer(device, vertex_bytes);
-  nrhi::Buffer* const index_buffer =
-      CreateUploadBuffer(device, index_bytes);
+  nrhi::Buffer* const vertex_buffer = CreateUploadBuffer(device, vertex_bytes);
+  nrhi::Buffer* const index_buffer = CreateUploadBuffer(device, index_bytes);
   if (vertex_buffer == nullptr || index_buffer == nullptr) {
     device->DestroyDeferred(vertex_buffer);
     device->DestroyDeferred(index_buffer);
-    REXLOG_ERROR(
-        "Table Tennis observer overlay: mesh buffer creation failed");
+    REXLOG_ERROR("Table Tennis observer overlay: mesh buffer creation failed");
     g_resources.failed = true;
     return false;
   }
@@ -309,8 +305,7 @@ bool SameVenueGeometry(const VenueFrameSnapshot& frame) {
     return false;
   }
   for (size_t index = 0; index < frame.draws.size(); ++index) {
-    if (frame.draws[index].mesh !=
-        g_resources.uploaded_venue_meshes[index]) {
+    if (frame.draws[index].mesh != g_resources.uploaded_venue_meshes[index]) {
       return false;
     }
   }
@@ -324,8 +319,7 @@ bool EnsureVenueBuffers(
     return false;
   }
   if (g_resources.venue_vertex_buffer != nullptr &&
-      g_resources.venue_index_buffer != nullptr &&
-      SameVenueGeometry(*frame)) {
+      g_resources.venue_index_buffer != nullptr && SameVenueGeometry(*frame)) {
     return true;
   }
 
@@ -339,27 +333,22 @@ bool EnsureVenueBuffers(
     index_count += draw.mesh->indices.size();
   }
   if (vertex_count == 0 || index_count == 0 ||
-      vertex_count > std::numeric_limits<uint32_t>::max() /
-                         sizeof(OverlayVertex) ||
-      index_count > std::numeric_limits<uint32_t>::max() /
-                        sizeof(uint16_t) ||
-      vertex_count > static_cast<size_t>(
-                         std::numeric_limits<int32_t>::max())) {
+      vertex_count >
+          std::numeric_limits<uint32_t>::max() / sizeof(OverlayVertex) ||
+      index_count > std::numeric_limits<uint32_t>::max() / sizeof(uint16_t) ||
+      vertex_count > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
     return false;
   }
 
   const size_t vertex_bytes = vertex_count * sizeof(OverlayVertex);
   const size_t index_bytes = index_count * sizeof(uint16_t);
   nrhi::Device* const device = context.device;
-  nrhi::Buffer* const vertex_buffer =
-      CreateUploadBuffer(device, vertex_bytes);
-  nrhi::Buffer* const index_buffer =
-      CreateUploadBuffer(device, index_bytes);
+  nrhi::Buffer* const vertex_buffer = CreateUploadBuffer(device, vertex_bytes);
+  nrhi::Buffer* const index_buffer = CreateUploadBuffer(device, index_bytes);
   if (vertex_buffer == nullptr || index_buffer == nullptr) {
     device->DestroyDeferred(vertex_buffer);
     device->DestroyDeferred(index_buffer);
-    REXLOG_ERROR(
-        "Table Tennis venue observer: buffer creation failed");
+    REXLOG_ERROR("Table Tennis venue observer: buffer creation failed");
     return false;
   }
 
@@ -439,8 +428,7 @@ nrhi::Format HostTextureFormat(const TableTextureSnapshot& texture) {
   }
 }
 
-void ComposeTextureSwizzle(uint32_t fetch_swizzle,
-                           nrhi::Swizzle output[4]) {
+void ComposeTextureSwizzle(uint32_t fetch_swizzle, nrhi::Swizzle output[4]) {
   for (uint32_t channel = 0; channel < 4; ++channel) {
     output[channel] =
         static_cast<nrhi::Swizzle>((fetch_swizzle >> (channel * 3)) & 7u);
@@ -464,10 +452,9 @@ VisibleTextureSnapshots() {
   return selected;
 }
 
-bool EnsureTexture(
-    const NativeGuestOutputRenderContext& context,
-    const std::shared_ptr<const TableTextureSnapshot>& snapshot,
-    size_t slot) {
+bool EnsureTexture(const NativeGuestOutputRenderContext& context,
+                   const std::shared_ptr<const TableTextureSnapshot>& snapshot,
+                   size_t slot) {
   if (snapshot == nullptr || !snapshot->valid()) {
     return false;
   }
@@ -479,15 +466,13 @@ bool EnsureTexture(
 
   const nrhi::Format format = HostTextureFormat(*snapshot);
   if (format == nrhi::Format::kUnknown) {
-    REXLOG_ERROR(
-        "Table Tennis observer overlay: unsupported texture format {}",
-        snapshot->format);
+    REXLOG_ERROR("Table Tennis observer overlay: unsupported texture format {}",
+                 snapshot->format);
     return false;
   }
 
   const uint32_t host_width =
-      ((snapshot->width + snapshot->block_width - 1) /
-       snapshot->block_width) *
+      ((snapshot->width + snapshot->block_width - 1) / snapshot->block_width) *
       snapshot->block_width;
   const uint32_t host_height =
       ((snapshot->height + snapshot->block_height - 1) /
@@ -497,16 +482,14 @@ bool EnsureTexture(
   const uint32_t upload_row_pitch =
       (snapshot->row_pitch_bytes + nrhi::kRowPitchAlignment - 1) &
       ~(nrhi::kRowPitchAlignment - 1);
-  const size_t upload_size =
-      static_cast<size_t>(upload_row_pitch) * block_rows;
+  const size_t upload_size = static_cast<size_t>(upload_row_pitch) * block_rows;
 
   nrhi::TextureDesc texture_desc;
   texture_desc.width = host_width;
   texture_desc.height = host_height;
   texture_desc.format = format;
   texture_desc.initial_state = nrhi::ResourceState::kCopyDest;
-  nrhi::Texture* const texture =
-      context.device->CreateTexture(texture_desc);
+  nrhi::Texture* const texture = context.device->CreateTexture(texture_desc);
   nrhi::BufferDesc upload_desc;
   upload_desc.size = upload_size;
   upload_desc.heap = nrhi::HeapKind::kUpload;
@@ -520,13 +503,11 @@ bool EnsureTexture(
     return false;
   }
 
-  uint8_t* const mapped =
-      static_cast<uint8_t*>(context.device->Map(upload));
+  uint8_t* const mapped = static_cast<uint8_t*>(context.device->Map(upload));
   if (mapped == nullptr) {
     context.device->DestroyDeferred(texture);
     context.device->DestroyDeferred(upload);
-    REXLOG_ERROR(
-        "Table Tennis observer overlay: texture upload map failed");
+    REXLOG_ERROR("Table Tennis observer overlay: texture upload map failed");
     return false;
   }
   for (uint32_t row = 0; row < block_rows; ++row) {
@@ -548,14 +529,12 @@ bool EnsureTexture(
   if (texture_view == nullptr) {
     context.device->DestroyDeferred(texture);
     context.device->DestroyDeferred(upload);
-    REXLOG_ERROR(
-        "Table Tennis observer overlay: texture view creation failed");
+    REXLOG_ERROR("Table Tennis observer overlay: texture view creation failed");
     return false;
   }
 
-  context.cmd->CopyBufferToTexture(
-      texture, 0, 0, upload, 0, upload_row_pitch, host_width,
-      host_height, 1);
+  context.cmd->CopyBufferToTexture(texture, 0, 0, upload, 0, upload_row_pitch,
+                                   host_width, host_height, 1);
   context.cmd->Barrier(texture, nrhi::ResourceState::kCopyDest,
                        nrhi::ResourceState::kPixelShaderResource);
   context.cmd->FlushBarriers();
@@ -570,15 +549,13 @@ bool EnsureTexture(
   REXLOG_INFO(
       "Table Tennis observer overlay: uploaded guest texture "
       "slot={} handle={:08X} {}x{} format={} payload={:016X}",
-      slot, snapshot->encoded_handle, snapshot->width,
-      snapshot->height, snapshot->format,
-      snapshot->payload_fingerprint);
+      slot, snapshot->encoded_handle, snapshot->width, snapshot->height,
+      snapshot->format, snapshot->payload_fingerprint);
   return true;
 }
 
 void PostProcess(const NativeGuestOutputRenderContext& context, void*) {
-  const bool replacement_requested =
-      VenueFamilyReplacementDrawCount() != 0;
+  const bool replacement_requested = VenueFamilyReplacementDrawCount() != 0;
   if (!ObserverOverlayEnabled() && !replacement_requested) {
     rex::graphics::RequestNativeGuestOutputPostProcess(false);
     return;
@@ -596,12 +573,10 @@ void PostProcess(const NativeGuestOutputRenderContext& context, void*) {
 
   ObserveNativeSceneTransaction(context);
 
-  const bool table_requested =
-      REXCVAR_GET(tabletennis_native_observer_overlay);
+  const bool table_requested = REXCVAR_GET(tabletennis_native_observer_overlay);
   const std::shared_ptr<const TableMeshSnapshot> table_mesh =
       table_requested ? LatestTableMeshSnapshot() : nullptr;
-  std::array<std::shared_ptr<const TableTextureSnapshot>, 2>
-      table_textures{};
+  std::array<std::shared_ptr<const TableTextureSnapshot>, 2> table_textures{};
   if (table_requested) {
     table_textures = VisibleTextureSnapshots();
   }
@@ -618,13 +593,11 @@ void PostProcess(const NativeGuestOutputRenderContext& context, void*) {
           : nullptr;
   const bool venue_capture_ready =
       venue_frame != nullptr && venue_frame->valid();
-  const bool replacement_ready =
-      replacement_requested && venue_capture_ready &&
-      PrepareVenueReplacement(context, venue_frame);
+  const bool replacement_ready = replacement_requested && venue_capture_ready &&
+                                 PrepareVenueReplacement(context, venue_frame);
   const bool venue_observer_ready =
       venue_observer_requested && venue_capture_ready;
-  const bool full_family_requested =
-      VenueFullFamilyOverlayEnabled();
+  const bool full_family_requested = VenueFullFamilyOverlayEnabled();
   const std::shared_ptr<const VenueFullFamilyFrame> full_family_frame =
       full_family_requested ? LatestVenueFullFamilyFrame() : nullptr;
   const bool full_family_capture_ready =
@@ -640,11 +613,17 @@ void PostProcess(const NativeGuestOutputRenderContext& context, void*) {
   const bool venue_14d_ready =
       venue_14d_requested && venue_14d_capture_ready &&
       PrepareVenue14DObserver(context, venue_14d_frame);
-  const bool player_overlay_requested =
-      PlayerObserverOverlayEnabled();
+  const bool venue_e33_requested = VenueE33RendererEnabled();
+  const std::shared_ptr<const VenueE33FrameSnapshot> venue_e33_frame =
+      venue_e33_requested ? LatestVenueE33FrameSnapshot() : nullptr;
+  const bool venue_e33_capture_ready =
+      venue_e33_frame != nullptr && venue_e33_frame->valid();
+  const bool venue_e33_ready =
+      venue_e33_requested && venue_e33_capture_ready &&
+      PrepareVenueE33Observer(context, venue_e33_frame);
+  const bool player_overlay_requested = PlayerObserverOverlayEnabled();
   const bool player_prepare_requested =
-      player_overlay_requested ||
-      PlayerReplacementPrewarmEnabled();
+      player_overlay_requested || PlayerReplacementPrewarmEnabled();
   const std::shared_ptr<const PlayerSkinFrameSnapshot> player_frame =
       player_prepare_requested ? LatestPlayerSkinFrameSnapshot() : nullptr;
   const bool player_capture_ready =
@@ -652,11 +631,16 @@ void PostProcess(const NativeGuestOutputRenderContext& context, void*) {
   const bool player_resources_ready =
       player_prepare_requested && player_capture_ready &&
       PreparePlayerObserverOverlay(context, player_frame);
-  const bool player_ready =
-      player_overlay_requested && player_resources_ready;
+  const bool player_ready = player_overlay_requested && player_resources_ready;
+  const bool player_6ae_requested = Player6AEObserverOverlayEnabled();
+  const std::shared_ptr<const Player6AEFrameSnapshot> player_6ae_frame =
+      player_6ae_requested ? LatestPlayer6AEFrameSnapshot() : nullptr;
+  const bool player_6ae_ready =
+      player_6ae_requested && player_6ae_frame != nullptr &&
+      player_6ae_frame->valid() &&
+      PreparePlayer6AEObserverOverlay(context, player_6ae_frame);
   const bool crowd_requested = CrowdObserverOverlayEnabled();
-  const bool crowd_prewarm_requested =
-      CrowdReplacementPrewarmEnabled();
+  const bool crowd_prewarm_requested = CrowdReplacementPrewarmEnabled();
   const bool crowd_prepare_requested =
       crowd_requested || crowd_prewarm_requested;
   const std::shared_ptr<const CrowdFrameSnapshot> crowd_frame =
@@ -668,35 +652,37 @@ void PostProcess(const NativeGuestOutputRenderContext& context, void*) {
   const bool crowd_resources_ready =
       crowd_prepare_requested && crowd_capture_ready &&
       (crowd_prewarm_requested
-           ? PrepareCrowdReplacementPrewarmResources(
-                 context, crowd_frame)
+           ? PrepareCrowdReplacementPrewarmResources(context, crowd_frame)
            : PrepareCrowdObserverOverlay(context, crowd_frame));
-  const bool crowd_ready =
-      crowd_requested && crowd_resources_ready;
+  const bool crowd_ready = crowd_requested && crowd_resources_ready;
   if (!table_structurally_ready && !venue_observer_ready &&
       !full_family_ready && !venue_14d_ready && !player_ready &&
-      !crowd_ready) {
+      !player_6ae_ready && !venue_e33_ready && !crowd_ready) {
     // Resource prewarming is the only reason this post-process was requested.
     // The in-order callback will consume it on a later guest draw.
     return;
   }
-  const bool table_ready =
-      table_structurally_ready &&
-      EnsurePipeline(context) &&
-      EnsureMeshBuffers(context, table_mesh) &&
-      EnsureTexture(context, table_textures[0], 0) &&
-      EnsureTexture(context, table_textures[1], 1);
+  const bool table_ready = table_structurally_ready &&
+                           EnsurePipeline(context) &&
+                           EnsureMeshBuffers(context, table_mesh) &&
+                           EnsureTexture(context, table_textures[0], 0) &&
+                           EnsureTexture(context, table_textures[1], 1);
   const bool venue_ready = venue_observer_ready;
-  if (!table_ready && !venue_ready && !full_family_ready &&
-      !venue_14d_ready && !player_ready && !crowd_ready) {
+  if (!table_ready && !venue_ready && !full_family_ready && !venue_14d_ready &&
+      !venue_e33_ready && !player_ready && !player_6ae_ready &&
+      !crowd_ready) {
     return;
   }
   (void)replacement_ready;
 
   nrhi::Cmd* const cmd = context.cmd;
   const nrhi::Viewport viewport = {
-      0.0f, 0.0f, static_cast<float>(context.guest_output_width),
-      static_cast<float>(context.guest_output_height), 0.0f, 1.0f};
+      0.0f,
+      0.0f,
+      static_cast<float>(context.guest_output_width),
+      static_cast<float>(context.guest_output_height),
+      0.0f,
+      1.0f};
   const nrhi::Rect scissor = {
       0, 0, static_cast<int32_t>(context.guest_output_width),
       static_cast<int32_t>(context.guest_output_height)};
@@ -715,19 +701,15 @@ void PostProcess(const NativeGuestOutputRenderContext& context, void*) {
     std::array<float, 24> constants{};
     std::copy(frame.camera.view_projection.begin(),
               frame.camera.view_projection.end(), constants.begin());
-    constexpr std::array<float, 4> kOverlayColor = {
-        1.0f, 1.0f, 1.0f, 0.72f};
+    constexpr std::array<float, 4> kOverlayColor = {1.0f, 1.0f, 1.0f, 0.72f};
     std::copy(kOverlayColor.begin(), kOverlayColor.end(),
               constants.begin() + 16);
     constants[20] =
-        REXCVAR_GET(tabletennis_native_observer_overlay_flat) ? 1.0f
-                                                              : 0.0f;
-    const uint32_t vertex_bytes =
-        static_cast<uint32_t>(table_mesh->positions.size() *
-                              sizeof(OverlayVertex));
-    const uint32_t index_bytes =
-        static_cast<uint32_t>(table_mesh->indices.size() *
-                              sizeof(table_mesh->indices.front()));
+        REXCVAR_GET(tabletennis_native_observer_overlay_flat) ? 1.0f : 0.0f;
+    const uint32_t vertex_bytes = static_cast<uint32_t>(
+        table_mesh->positions.size() * sizeof(OverlayVertex));
+    const uint32_t index_bytes = static_cast<uint32_t>(
+        table_mesh->indices.size() * sizeof(table_mesh->indices.front()));
     cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
     cmd->SetRootConstants(0, constants.size(), constants.data(), 0);
     cmd->SetTexturePair(1, g_resources.texture_views[0],
@@ -735,8 +717,7 @@ void PostProcess(const NativeGuestOutputRenderContext& context, void*) {
     cmd->SetVertexBuffer(g_resources.vertex_buffer, 0, vertex_bytes,
                          sizeof(OverlayVertex));
     cmd->SetIndexBuffer(g_resources.index_buffer, 0, index_bytes);
-    cmd->DrawIndexed(
-        static_cast<uint32_t>(table_mesh->indices.size()), 0, 0);
+    cmd->DrawIndexed(static_cast<uint32_t>(table_mesh->indices.size()), 0, 0);
   }
 
   const uint32_t venue_draw_count =
@@ -746,20 +727,22 @@ void PostProcess(const NativeGuestOutputRenderContext& context, void*) {
           ? RenderVenueFullFamilyOverlay(context, full_family_frame)
           : 0;
   const uint32_t venue_14d_draw_count =
-      venue_14d_ready
-          ? RenderVenue14DObserver(context, venue_14d_frame)
-          : 0;
+      venue_14d_ready ? RenderVenue14DObserver(context, venue_14d_frame) : 0;
+  const uint32_t venue_e33_draw_count =
+      venue_e33_ready ? RenderVenueE33Observer(context, venue_e33_frame) : 0;
   const uint32_t player_draw_count =
-      player_ready
-          ? RenderPlayerObserverOverlay(context, player_frame)
+      player_ready ? RenderPlayerObserverOverlay(context, player_frame) : 0;
+  const uint32_t player_6ae_draw_count =
+      player_6ae_ready
+          ? RenderPlayer6AEObserverOverlay(context, player_6ae_frame)
           : 0;
   const uint32_t crowd_draw_count =
-      crowd_ready
-          ? RenderCrowdObserverOverlay(context, crowd_frame)
-          : 0;
+      crowd_ready ? RenderCrowdObserverOverlay(context, crowd_frame) : 0;
   (void)full_family_draw_count;
   (void)venue_14d_draw_count;
+  (void)venue_e33_draw_count;
   (void)player_draw_count;
+  (void)player_6ae_draw_count;
   (void)crowd_draw_count;
 
   cmd->Barrier(context.guest_output, nrhi::ResourceState::kRenderTarget,
@@ -774,13 +757,10 @@ void PostProcess(const NativeGuestOutputRenderContext& context, void*) {
         "vertices={} indices={} texture_handles={:08X},{:08X} "
         "camera_generation={} candidates={}",
         table_mesh->positions.size(), table_mesh->indices.size(),
-        table_textures[0]->encoded_handle,
-        table_textures[1]->encoded_handle,
-        frame.camera.constant_generation,
-        frame.camera.verified_candidates);
+        table_textures[0]->encoded_handle, table_textures[1]->encoded_handle,
+        frame.camera.constant_generation, frame.camera.verified_candidates);
   }
-  if (venue_draw_count != 0 &&
-      !g_resources.announced_venue_draw) {
+  if (venue_draw_count != 0 && !g_resources.announced_venue_draw) {
     g_resources.announced_venue_draw = true;
     REXLOG_INFO(
         "Table Tennis venue observer: drew {} trace-verified real "
@@ -794,58 +774,58 @@ void PostProcess(const NativeGuestOutputRenderContext& context, void*) {
 bool ObserverOverlayEnabled() {
   return REXCVAR_GET(tabletennis_native_observer_overlay) ||
          NativeSceneTransactionObserverEnabled() ||
-         VenueFamilyObserverEnabled() ||
-         VenueFullFamilyOverlayEnabled() ||
-         Venue14DRendererEnabled() ||
+         VenueFamilyObserverEnabled() || VenueFullFamilyOverlayEnabled() ||
+         Venue14DRendererEnabled() || VenueE33RendererEnabled() ||
          PlayerObserverOverlayEnabled() ||
+         Player6AEObserverOverlayEnabled() ||
          PlayerReplacementPrewarmEnabled() ||
-         CrowdObserverOverlayEnabled() ||
-         CrowdReplacementPrewarmEnabled();
+         CrowdObserverOverlayEnabled() || CrowdReplacementPrewarmEnabled();
 }
 
-void RequestObserverOverlayForFrame(bool gameplay_active,
-                                    bool camera_valid) {
-  const bool table_ready =
-      REXCVAR_GET(tabletennis_native_observer_overlay) &&
-      camera_valid && HasTableMeshSnapshot();
+bool TableMeshObserverOverlayEnabled() {
+  return REXCVAR_GET(tabletennis_native_observer_overlay);
+}
+
+void RequestObserverOverlayForFrame(bool gameplay_active, bool camera_valid) {
+  const bool table_ready = REXCVAR_GET(tabletennis_native_observer_overlay) &&
+                           camera_valid && HasTableMeshSnapshot();
   const bool venue_ready =
       VenueFamilyObserverEnabled() && HasVenueFrameSnapshot();
   const std::shared_ptr<const VenueFullFamilyFrame> full_family_frame =
-      VenueFullFamilyOverlayEnabled()
-          ? LatestVenueFullFamilyFrame()
-          : nullptr;
+      VenueFullFamilyOverlayEnabled() ? LatestVenueFullFamilyFrame() : nullptr;
   const bool full_family_ready =
       full_family_frame != nullptr && full_family_frame->valid();
   const std::shared_ptr<const Venue14DFrameSnapshot> venue_14d_frame =
-      Venue14DRendererEnabled()
-          ? LatestVenue14DFrameSnapshot()
-          : nullptr;
+      Venue14DRendererEnabled() ? LatestVenue14DFrameSnapshot() : nullptr;
   const bool venue_14d_ready =
       venue_14d_frame != nullptr && venue_14d_frame->valid();
+  const std::shared_ptr<const VenueE33FrameSnapshot> venue_e33_frame =
+      VenueE33RendererEnabled() ? LatestVenueE33FrameSnapshot() : nullptr;
+  const bool venue_e33_ready =
+      venue_e33_frame != nullptr && venue_e33_frame->valid();
   const bool replacement_ready =
-      VenueFamilyReplacementDrawCount() != 0 &&
-      HasVenueFrameSnapshot();
+      VenueFamilyReplacementDrawCount() != 0 && HasVenueFrameSnapshot();
   const std::shared_ptr<const PlayerSkinFrameSnapshot> player_frame =
-      (PlayerObserverOverlayEnabled() ||
-       PlayerReplacementPrewarmEnabled())
+      (PlayerObserverOverlayEnabled() || PlayerReplacementPrewarmEnabled())
           ? LatestPlayerSkinFrameSnapshot()
           : nullptr;
-  const bool player_ready =
-      player_frame != nullptr && player_frame->valid();
+  const bool player_ready = player_frame != nullptr && player_frame->valid();
+  const std::shared_ptr<const Player6AEFrameSnapshot> player_6ae_frame =
+      Player6AEObserverOverlayEnabled() ? LatestPlayer6AEFrameSnapshot()
+                                       : nullptr;
+  const bool player_6ae_ready =
+      player_6ae_frame != nullptr && player_6ae_frame->valid();
   const std::shared_ptr<const CrowdFrameSnapshot> crowd_frame =
       CrowdReplacementPrewarmEnabled()
           ? LatestCrowdBackendProofFrameSnapshot()
-          : (CrowdObserverOverlayEnabled()
-                 ? LatestCrowdFrameSnapshot()
-                 : nullptr);
-  const bool crowd_ready =
-      crowd_frame != nullptr && crowd_frame->valid();
+          : (CrowdObserverOverlayEnabled() ? LatestCrowdFrameSnapshot()
+                                           : nullptr);
+  const bool crowd_ready = crowd_frame != nullptr && crowd_frame->valid();
   rex::graphics::RequestNativeGuestOutputPostProcess(
       gameplay_active &&
-      (NativeSceneTransactionObserverEnabled() || table_ready ||
-       venue_ready || full_family_ready ||
-       venue_14d_ready || replacement_ready || player_ready ||
-       crowd_ready));
+      (NativeSceneTransactionObserverEnabled() || table_ready || venue_ready ||
+       full_family_ready || venue_14d_ready || venue_e33_ready ||
+       replacement_ready || player_ready || player_6ae_ready || crowd_ready));
 }
 
 void InstallObserverOverlay() {
@@ -857,7 +837,9 @@ void InstallObserverOverlay() {
       "tabletennis_native_venue_observer, "
       "tabletennis_native_venue_full_family_overlay, "
       "tabletennis_native_venue_14d_renderer, "
+      "tabletennis_native_venue_e33_renderer, "
       "tabletennis_native_player_observer_overlay, "
+      "tabletennis_native_player_6ae_observer_overlay, "
       "tabletennis_native_player_replacement_prewarm, "
       "tabletennis_native_crowd_observer, "
       "tabletennis_native_crowd_replacement_prewarm, "
@@ -868,9 +850,12 @@ void ShutdownObserverOverlay() {
   rex::graphics::RequestNativeGuestOutputPostProcess(false);
   rex::graphics::SetNativeGuestOutputPostProcessor(nullptr, nullptr);
   ShutdownCrowdObserverRenderer();
+  ShutdownPlayer6AEObserverRenderer();
   ShutdownPlayerObserverRenderer();
   ShutdownVenue14DRenderer();
+  ShutdownVenueE33Renderer();
   ShutdownVenueObserverRenderer();
+  ShutdownExactMainTargets();
   ShutdownNativeSceneRenderTargets();
   ReleaseGpuResources();
 }

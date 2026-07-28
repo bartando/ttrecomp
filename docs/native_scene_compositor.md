@@ -178,9 +178,11 @@ discard the complete private target without touching guest_output
 
 PS328 uses its real `ps_replace` material path, CA9 retains the captured
 prepass/color phase per individual draw, and C6 retains its captured sampler
-and material constants. Existing overlay entry points remain comparison
-tools, while these explicit scene adapters share their prepared resource
-caches.
+and material constants. The compositor independently requires C6's uniform
+backend block and exact raster contract before admitting the frame, matching
+the renderer's fail-closed preparation gate. Existing overlay entry points
+remain comparison tools, while these explicit scene adapters share their
+prepared resource caches.
 
 Runtime serving is still blocked on complete family coverage, exact
 per-family raster/material contracts, and visual/telemetry verification of

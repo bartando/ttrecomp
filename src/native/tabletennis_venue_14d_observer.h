@@ -26,6 +26,13 @@ struct Venue14DBackendContract {
   uint32_t blend_control_0 = 0;
   uint32_t rasterizer_mode_control = 0;
   uint32_t primitive_restart_index = 0;
+  uint32_t rb_color_info_0 = 0;
+  uint32_t rb_depth_info = 0;
+  uint32_t rb_surface_info = 0;
+  uint32_t rb_modecontrol = 0;
+  uint32_t color_edram_base = 0;
+  uint32_t depth_edram_base = 0;
+  uint32_t edram_mode = 0;
   std::array<uint32_t, 4> color_attachment_formats{};
   uint32_t color_attachment_count = 0;
   uint32_t depth_attachment_format = 0;
@@ -34,15 +41,33 @@ struct Venue14DBackendContract {
   uint64_t sample_mask = 0;
   bool primitive_restart_enabled = false;
   bool rasterizer_mode_control_valid = false;
+  bool render_target_state_valid = false;
   bool valid = false;
 };
 
 struct Venue14DDrawSnapshot {
   std::shared_ptr<const Venue14DTitleDrawSnapshot> title;
+  Venue14DDrawIdentity backend_identity{};
   Venue14DBackendContract backend{};
 
   bool valid() const {
-    return title != nullptr && title->valid && backend.valid;
+    if (title == nullptr || !title->valid || title->vertices == nullptr ||
+        title->indices == nullptr || !backend_identity.valid() ||
+        title->identity != backend_identity || !backend.valid ||
+        backend.vertex_shader_hash !=
+            Venue14DVertexShaderForLayout(title->vertices->stride,
+                                          title->vertices->endian) ||
+        backend.pixel_shader_hash != kVenue14DPixelShaderHash) {
+      return false;
+    }
+    return backend_identity.guest_index_base ==
+               title->indices->physical_address &&
+           backend_identity.guest_vertex_base ==
+               title->vertices->physical_address &&
+           backend_identity.guest_vertex_bytes == title->vertices->byte_count &&
+           backend_identity.guest_vertex_endian == title->vertices->endian &&
+           title->vertices->byte_count >= title->vertices->stride &&
+           title->vertices->byte_count % title->vertices->stride == 0;
   }
 };
 

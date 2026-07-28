@@ -3,6 +3,7 @@
 #include "generated/default/tabletennis_init.h"
 #include "native/tabletennis_frame_scene.h"
 #include "native/tabletennis_guest_memory.h"
+#include "native/tabletennis_late_phase_ledger.h"
 #include "native/tabletennis_texture_snapshot.h"
 
 #include <algorithm>
@@ -458,7 +459,7 @@ void LogFrame(const HudSwfFrameSnapshot &frame) {
 
 bool HudSwfCaptureEnabled() {
   return REXCVAR_GET(tabletennis_native_hud_swf_capture) ||
-         NativeFrameSceneCaptureEnabled();
+         NativeFrameSceneCaptureEnabled() || LatePhaseLedgerEnabled();
 }
 
 void BeginHudSwfDrawScope(uint8_t *guest_base, uint32_t swf_context) {

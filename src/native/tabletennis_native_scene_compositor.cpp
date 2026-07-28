@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <utility>
 
+#include <rex/logging.h>
+
 namespace tabletennis::native {
 namespace {
 
@@ -70,7 +72,8 @@ bool CatalogDrawMatches(const SceneCatalogDrawOccurrence &catalog,
          title.title_vertex_shader == catalog.pass.vertex_shader &&
          title.title_pixel_shader == catalog.pass.pixel_shader &&
          catalog.pass.shader_fingerprints_valid &&
-         venue.backend.vertex_shader_hash == catalog.pass.vertex_shader_hash &&
+         venue.backend.vertex_shader_hash ==
+             Venue14DVertexShaderForLayout(vertices.stride, vertices.endian) &&
          venue.backend.pixel_shader_hash == catalog.pass.pixel_shader_hash &&
          title.owner_kind == static_cast<uint32_t>(catalog.owner.kind) &&
          title.owner == catalog.owner.owner &&
@@ -79,6 +82,9 @@ bool CatalogDrawMatches(const SceneCatalogDrawOccurrence &catalog,
          title.identity.submitted_index_count ==
              catalog.submitted_index_count &&
          title.identity.guest_index_base == indices.physical_address &&
+         title.identity.guest_vertex_base == vertices.physical_address &&
+         title.identity.guest_vertex_bytes == vertices.byte_count &&
+         title.identity.guest_vertex_endian == vertices.endian &&
          catalog.mesh.valid &&
          vertices.source_virtual_alias == catalog.mesh.vertex_buffer_alias &&
          vertices.byte_count == catalog.mesh.vertex_buffer_bytes &&
@@ -111,6 +117,117 @@ bool CatalogDrawMatches(const SceneCatalogDrawOccurrence &catalog,
          player.alternate_pass == catalog.scope.alternate_pass;
 }
 
+void LogCatalogMismatch(const SceneCatalogDrawOccurrence &catalog,
+                        const VenueFullFamilyDrawSnapshot &venue) {
+  const SceneCatalogDrawOccurrence &source = venue.source;
+  const VenueDrawSnapshot &captured = venue.captured;
+  REXLOG_INFO(
+      "Table Tennis native composition mismatch: family=venue_ps328 "
+      "ordinal[catalog={} source={} captured={}] "
+      "player[catalog={:08X} source={:08X}] "
+      "scope[catalog={:08X}/{:08X}/{} source={:08X}/{:08X}/{}] "
+      "pass[catalog={:08X}/{:08X}/{:08X}/{:08X} "
+      "source={:08X}/{:08X}/{:08X}/{:08X}] "
+      "draw[catalog={}/{} source={}/{} captured_count={}]",
+      catalog.ordinal, source.ordinal, captured.ordinal, catalog.player,
+      source.player, catalog.scope.shader, catalog.scope.model,
+      catalog.scope.geometry_index, source.scope.shader, source.scope.model,
+      source.scope.geometry_index, catalog.pass.pass_descriptor,
+      catalog.pass.program_pair, catalog.pass.vertex_shader,
+      catalog.pass.pixel_shader, source.pass.pass_descriptor,
+      source.pass.program_pair, source.pass.vertex_shader,
+      source.pass.pixel_shader, catalog.primitive_type,
+      catalog.submitted_index_count, source.primitive_type,
+      source.submitted_index_count,
+      captured.mesh != nullptr ? captured.mesh->submitted_index_count : 0);
+}
+
+void LogCatalogMismatch(const SceneCatalogDrawOccurrence &catalog,
+                        const Venue14DDrawSnapshot &venue) {
+  const Venue14DTitleDrawSnapshot *title = venue.title.get();
+  const Venue14DVertexPayload *vertices =
+      title != nullptr ? title->vertices.get() : nullptr;
+  REXLOG_INFO(
+      "Table Tennis native composition mismatch: family=venue_14d "
+      "ordinal[catalog={} title={}] pass[catalog={:08X}/{:08X}/{:08X}/"
+      "{:08X} title={:08X}/{:08X}/{:08X}/{:08X}] "
+      "hash[pass={:016X}/{:016X}/{} "
+      "bound_catalog={:016X}/{:016X}/{}/{} backend={:016X}/{:016X} "
+      "expected_vs={:016X}] "
+      "draw[catalog={}/{} title={}/{}] owner[catalog={}/{:08X}/{:08X} "
+      "title={}/{:08X}/{:08X}] "
+      "vertex[catalog={:08X}/{}/{} title={:08X}/{}/{}]",
+      catalog.ordinal, title != nullptr ? title->ordinal : 0,
+      catalog.pass.pass_descriptor, catalog.pass.program_pair,
+      catalog.pass.vertex_shader, catalog.pass.pixel_shader,
+      title != nullptr ? title->pass_descriptor : 0,
+      title != nullptr ? title->program_pair : 0,
+      title != nullptr ? title->title_vertex_shader : 0,
+      title != nullptr ? title->title_pixel_shader : 0,
+      catalog.pass.vertex_shader_hash, catalog.pass.pixel_shader_hash,
+      catalog.pass.shader_fingerprints_valid,
+      catalog.bound_shaders.vertex_shader_hash,
+      catalog.bound_shaders.pixel_shader_hash,
+      catalog.bound_shaders.vertex_shader_valid,
+      catalog.bound_shaders.pixel_shader_valid,
+      venue.backend.vertex_shader_hash, venue.backend.pixel_shader_hash,
+      Venue14DVertexShaderForLayout(
+          vertices != nullptr ? vertices->stride : 0,
+          vertices != nullptr ? vertices->endian : 0),
+      catalog.primitive_type, catalog.submitted_index_count,
+      title != nullptr ? title->identity.primitive_type : 0,
+      title != nullptr ? title->identity.submitted_index_count : 0,
+      static_cast<uint32_t>(catalog.owner.kind), catalog.owner.owner,
+      catalog.owner.renderable, title != nullptr ? title->owner_kind : 0,
+      title != nullptr ? title->owner : 0,
+      title != nullptr ? title->owner_renderable : 0,
+      catalog.mesh.vertex_buffer_alias, catalog.mesh.vertex_buffer_bytes,
+      catalog.mesh.vertex_endian,
+      vertices != nullptr ? vertices->source_virtual_alias : 0,
+      vertices != nullptr ? vertices->byte_count : 0,
+      vertices != nullptr ? vertices->endian : 0);
+}
+
+void LogCatalogMismatch(const SceneCatalogDrawOccurrence &catalog,
+                        const CrowdDrawSnapshot &crowd) {
+  REXLOG_INFO(
+      "Table Tennis native composition mismatch: family=crowd_c6 "
+      "ordinal[catalog={} crowd={}] scope[catalog={:08X}/{:08X}/{} "
+      "crowd={:08X}/{:08X}/{}] "
+      "pass[catalog={:08X}/{:08X}/{:08X}/{:08X} "
+      "crowd={:08X}/{:08X}/{:08X}/{:08X}] "
+      "draw[catalog={}/{} crowd={}/{}]",
+      catalog.ordinal, crowd.ordinal, catalog.scope.shader,
+      catalog.scope.model, catalog.scope.geometry_index, crowd.shader,
+      crowd.model, crowd.geometry_index, catalog.pass.pass_descriptor,
+      catalog.pass.program_pair, catalog.pass.vertex_shader,
+      catalog.pass.pixel_shader, crowd.pass_descriptor, crowd.program_pair,
+      crowd.vertex_shader, crowd.pixel_shader, catalog.primitive_type,
+      catalog.submitted_index_count, crowd.primitive_type,
+      crowd.submitted_index_count);
+}
+
+void LogCatalogMismatch(const SceneCatalogDrawOccurrence &catalog,
+                        const PlayerSkinDrawSnapshot &player) {
+  REXLOG_INFO(
+      "Table Tennis native composition mismatch: family=player_ca9 "
+      "ordinal[catalog={} player={}] player[catalog={:08X} draw={:08X}] "
+      "scope[catalog={:08X}/{:08X}/{} player={:08X}/{:08X}/{}] "
+      "pass[catalog={:08X}/{:08X}/{:08X}/{:08X} "
+      "player={:08X}/{:08X}/{:08X}/{:08X}] "
+      "draw[catalog={}/{} player={}/{}] alternate[catalog={} player={}]",
+      catalog.ordinal, player.ordinal, catalog.player, player.player,
+      catalog.scope.shader, catalog.scope.model,
+      catalog.scope.geometry_index, player.shader, player.model,
+      player.geometry_index, catalog.pass.pass_descriptor,
+      catalog.pass.program_pair, catalog.pass.vertex_shader,
+      catalog.pass.pixel_shader, player.pass_descriptor, player.program_pair,
+      player.vertex_shader, player.pixel_shader, catalog.primitive_type,
+      catalog.submitted_index_count, player.primitive_type,
+      player.submitted_index_count, catalog.scope.alternate_pass,
+      player.alternate_pass);
+}
+
 template <typename Draw, typename Ordinal, typename Matcher>
 bool AppendFamilyDraws(NativeSceneCompositionPlan &plan,
                        const std::vector<Draw> &draws,
@@ -121,12 +238,21 @@ bool AppendFamilyDraws(NativeSceneCompositionPlan &plan,
     const Draw &draw = draws[draw_index];
     const uint32_t ordinal = ordinal_of(draw);
     if (ordinal == 0 || ordinal > catalog.ordered_draw_count) {
+      plan.readiness.failed_family = family;
+      plan.readiness.failed_family_draw_index =
+          static_cast<uint32_t>(draw_index);
+      plan.readiness.failed_ordinal = ordinal;
       Reject(plan, NativeSceneCompositionRejectReason::kOrdinalOutsideCatalog);
       return false;
     }
     const SceneCatalogDrawOccurrence &catalog_draw =
         catalog.ordered_draws[ordinal - 1];
     if (catalog_draw.ordinal != ordinal || !matcher(catalog_draw, draw)) {
+      LogCatalogMismatch(catalog_draw, draw);
+      plan.readiness.failed_family = family;
+      plan.readiness.failed_family_draw_index =
+          static_cast<uint32_t>(draw_index);
+      plan.readiness.failed_ordinal = ordinal;
       Reject(plan,
              NativeSceneCompositionRejectReason::kCatalogIdentityMismatch);
       return false;
@@ -142,6 +268,15 @@ bool AppendFamilyDraws(NativeSceneCompositionPlan &plan,
 
 bool SameFrame(uint64_t title_sequence, uint64_t family_sequence) {
   return title_sequence != 0 && family_sequence == title_sequence;
+}
+
+bool CrowdBackendProofValid(const CrowdFrameSnapshot &frame) {
+  constexpr uint32_t kCrowdRasterizerMode = 0x00018002;
+  const CrowdBackendBlockContractTelemetry &contract =
+      frame.backend_last_contract;
+  return frame.backend_block_proof_observed && contract.block_uniform &&
+         contract.rasterizer_mode_control_valid &&
+         contract.rasterizer_mode_control == kCrowdRasterizerMode;
 }
 
 } // namespace
@@ -205,7 +340,9 @@ NativeSceneCompositionPlan BuildNativeSceneCompositionPlan(
   ready.family_frames_exact = true;
 
   if (!plan.scene->venue_ps328->valid() || !plan.scene->venue_14d->valid() ||
-      !plan.scene->crowd_c6->valid() || !plan.scene->player_ca9->valid()) {
+      !plan.scene->crowd_c6->valid() ||
+      !CrowdBackendProofValid(*plan.scene->crowd_c6) ||
+      !plan.scene->player_ca9->valid()) {
     Reject(plan, NativeSceneCompositionRejectReason::kInvalidFamilyFrame);
     return plan;
   }

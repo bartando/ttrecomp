@@ -133,6 +133,7 @@ struct Resources {
   int32_t prepared_geometry_group = 0;
   uint64_t prepared_signature = 0;
   uint64_t announced_signature = 0;
+  uint32_t announced_native_scene_failure_mask = 0;
   int32_t announced_invalid_geometry_group =
       std::numeric_limits<int32_t>::min();
   uint64_t announced_rejected_texture = 0;
@@ -1177,10 +1178,59 @@ bool PrepareCrowdNativeScene(
     const rex::graphics::NativeGuestOutputRenderContext &context,
     const NativeScenePassTargets &targets,
     const std::shared_ptr<const CrowdFrameSnapshot> &frame) {
-  return ValidateNativeScenePassTargets(context, targets) ==
-             NativeScenePassTargetValidation::kValid &&
-         frame != nullptr && NativeSceneFrameReady(*frame) &&
-         PrepareCrowdResources(context, frame, -1, &targets);
+  constexpr uint32_t kInvalidTargets = 1u << 0;
+  constexpr uint32_t kMissingFrame = 1u << 1;
+  constexpr uint32_t kInvalidFrame = 1u << 2;
+  constexpr uint32_t kMissingBackendProof = 1u << 3;
+  constexpr uint32_t kInvalidBackendContract = 1u << 4;
+  constexpr uint32_t kResourcePreparationFailed = 1u << 5;
+
+  uint32_t failure = 0;
+  const NativeScenePassTargetValidation target_validation =
+      ValidateNativeScenePassTargets(context, targets);
+  if (target_validation != NativeScenePassTargetValidation::kValid) {
+    failure = kInvalidTargets;
+  } else if (frame == nullptr) {
+    failure = kMissingFrame;
+  } else if (!FrameReady(*frame)) {
+    failure = kInvalidFrame;
+  } else if (!frame->backend_block_proof_observed) {
+    failure = kMissingBackendProof;
+  } else if (!frame->backend_last_contract.block_uniform ||
+             !frame->backend_last_contract.rasterizer_mode_control_valid ||
+             frame->backend_last_contract.rasterizer_mode_control !=
+                 kNativeSceneRasterizerMode) {
+    failure = kInvalidBackendContract;
+  } else if (!PrepareCrowdResources(context, frame, -1, &targets)) {
+    failure = kResourcePreparationFailed;
+  } else {
+    return true;
+  }
+
+  if ((g_resources.announced_native_scene_failure_mask & failure) == 0) {
+    g_resources.announced_native_scene_failure_mask |= failure;
+    const CrowdBackendBlockContractTelemetry contract =
+        frame != nullptr ? frame->backend_last_contract
+                         : CrowdBackendBlockContractTelemetry{};
+    REXLOG_INFO(
+        "Table Tennis C6 native scene: preparation rejected reason={} "
+        "target={} frame={} draws={} frame_valid={} proof={} "
+        "contract[uniform={} raster={:08X}/{}] "
+        "resources[failed={} vertices={} indices={} textures={} "
+        "pipeline={} prepared={}]",
+        failure, static_cast<uint32_t>(target_validation),
+        frame != nullptr ? frame->sequence : 0,
+        frame != nullptr ? frame->draws.size() : 0,
+        frame != nullptr && FrameReady(*frame),
+        frame != nullptr && frame->backend_block_proof_observed,
+        contract.block_uniform, contract.rasterizer_mode_control,
+        contract.rasterizer_mode_control_valid, g_resources.failed,
+        g_resources.vertices.size(), g_resources.indices.size(),
+        g_resources.textures.size(),
+        g_resources.native_scene_pipeline != nullptr,
+        frame != nullptr && g_resources.prepared_frame == frame);
+  }
+  return false;
 }
 
 CrowdNativeSceneRecordResult RecordPreparedCrowdNativeSceneDraw(

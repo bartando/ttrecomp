@@ -564,7 +564,7 @@ void D47PlayerObserverFrameEnd() {
 
 bool D47PlayerObserverEnabled() {
   return REXCVAR_GET(tabletennis_native_d47_player_observer) ||
-         NativeFrameSceneCaptureEnabled();
+         NativeFrameSceneFullCaptureEnabled();
 }
 
 std::shared_ptr<const D47PlayerFrameSnapshot> LatestD47PlayerFrameSnapshot() {

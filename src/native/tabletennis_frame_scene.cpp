@@ -8,12 +8,13 @@
 #include "native/tabletennis_native_scene_transaction.h"
 #include "native/tabletennis_net_bb903_observer.h"
 #include "native/tabletennis_player_palette_write_observer.h"
-#include "native/tabletennis_player_skin_snapshot.h"
 #include "native/tabletennis_player_replacement_candidates.h"
+#include "native/tabletennis_player_skin_snapshot.h"
+#include "native/tabletennis_ps328_tile_invariance.h"
 #include "native/tabletennis_scene_draw_catalog.h"
-#include "native/tabletennis_venue_full_family.h"
 #include "native/tabletennis_venue_14d_observer.h"
 #include "native/tabletennis_venue_e33_observer.h"
+#include "native/tabletennis_venue_full_family.h"
 
 #include <algorithm>
 #include <deque>
@@ -54,8 +55,7 @@ uint64_t g_generation = 0;
 uint32_t g_consecutive_complete_frames = 0;
 bool g_logged_first_gameplay_frame = false;
 
-uint32_t DrawCount(
-    const std::shared_ptr<const VenueFullFamilyFrame> &frame) {
+uint32_t DrawCount(const std::shared_ptr<const VenueFullFamilyFrame> &frame) {
   return frame == nullptr ? 0 : static_cast<uint32_t>(frame->draws.size());
 }
 
@@ -63,8 +63,8 @@ uint32_t DrawCount(const std::shared_ptr<const CrowdFrameSnapshot> &frame) {
   return frame == nullptr ? 0 : static_cast<uint32_t>(frame->draws.size());
 }
 
-uint32_t DrawCount(
-    const std::shared_ptr<const PlayerSkinFrameSnapshot> &frame) {
+uint32_t
+DrawCount(const std::shared_ptr<const PlayerSkinFrameSnapshot> &frame) {
   return frame == nullptr ? 0 : static_cast<uint32_t>(frame->draws.size());
 }
 
@@ -72,8 +72,7 @@ bool CurrentCatalog(const SceneDrawCatalogFrame &catalog,
                     uint64_t title_sequence) {
   return title_sequence != 0 && catalog.sequence == title_sequence &&
          catalog.ordered_draw_count != 0 &&
-         catalog.dropped_ordered_draws == 0 &&
-         catalog.guest_read_failures == 0;
+         catalog.dropped_ordered_draws == 0 && catalog.guest_read_failures == 0;
 }
 
 template <typename Frame>
@@ -120,16 +119,12 @@ bool CompositionComponentsJoined(const TableTennisFrameScene &scene) {
 
 void LogReadiness(const TableTennisFrameScene &scene) {
   const NativeSceneReadiness &ready = scene.readiness;
-  const D47PlayerObserverTelemetry d47 =
-      LatestD47PlayerObserverTelemetry();
-  const Venue14DObserverTelemetry venue_14d =
-      LatestVenue14DObserverTelemetry();
-  const VenueE33ObserverTelemetry venue_e33 =
-      LatestVenueE33ObserverTelemetry();
+  const D47PlayerObserverTelemetry d47 = LatestD47PlayerObserverTelemetry();
+  const Venue14DObserverTelemetry venue_14d = LatestVenue14DObserverTelemetry();
+  const VenueE33ObserverTelemetry venue_e33 = LatestVenueE33ObserverTelemetry();
   const Player6AEObserverTelemetry player_6ae =
       LatestPlayer6AEObserverTelemetry();
-  const NetBB903ObserverTelemetry net_bb903 =
-      LatestNetBB903ObserverTelemetry();
+  const NetBB903ObserverTelemetry net_bb903 = LatestNetBB903ObserverTelemetry();
   const PlayerPaletteWriteObserverFrame palette =
       LatestPlayerPaletteWriteObserverFrame();
   const uint32_t palette_destination_0 =
@@ -149,7 +144,8 @@ void LogReadiness(const TableTennisFrameScene &scene) {
       "d47[candidates={} admitted={} backend={} blocks={} pending={} "
       "queued={} finalized={} valid={} expired={} mismatches={}] "
       "14d[seen={} candidates={} valid_title={} reads={} copies={} "
-      "textures={} backend_seen={} backend_frame={} backend_hash={} backend_pair={} "
+      "textures={} backend_seen={} backend_frame={} backend_hash={} "
+      "backend_pair={} "
       "backend={} analyzed={} unjoined={} blocks={} "
       "pending={} queued={} finalized={} valid={} expired={} mismatches={}] "
       "6ae[candidates={} admitted={} backend={} blocks={} pending={} "
@@ -170,46 +166,37 @@ void LogReadiness(const TableTennisFrameScene &scene) {
       scene.generation, scene.title.sequence, ready.gameplay_active,
       ready.reference_covered_main_draw_count,
       NativeSceneReadiness::kReferenceMainDrawCount,
-      ready.reference_missing_main_draw_count,
-      ready.venue_ps328_draw_count, ready.venue_14d_draw_count,
-      ready.venue_e33_draw_count,
-      ready.crowd_c6_draw_count,
-      ready.player_ca9_draw_count, ready.player_d47_draw_count,
-      ready.player_6ae_draw_count,
+      ready.reference_missing_main_draw_count, ready.venue_ps328_draw_count,
+      ready.venue_14d_draw_count, ready.venue_e33_draw_count,
+      ready.crowd_c6_draw_count, ready.player_ca9_draw_count,
+      ready.player_d47_draw_count, ready.player_6ae_draw_count,
       scene.catalog == nullptr ? 0 : scene.catalog->sequence,
       ready.catalog_draw_count, ready.catalog_dropped_draw_count,
       ready.catalog_guest_read_failures, d47.title_candidates,
-      d47.admitted_draws, d47.backend_events,
-      d47.backend_tile_blocks_matched, d47.pending_frames,
-      d47.queued_backend_events, d47.finalized_frames, d47.valid_frames,
-      d47.expired_frames, d47.backend_sequence_mismatches,
+      d47.admitted_draws, d47.backend_events, d47.backend_tile_blocks_matched,
+      d47.pending_frames, d47.queued_backend_events, d47.finalized_frames,
+      d47.valid_frames, d47.expired_frames, d47.backend_sequence_mismatches,
       venue_14d.title_draws_observed, venue_14d.title_candidates,
-      venue_14d.valid_title_snapshots,
-      venue_14d.title_guest_read_failures,
+      venue_14d.valid_title_snapshots, venue_14d.title_guest_read_failures,
       venue_14d.title_payload_copy_failures,
       venue_14d.title_texture_capture_failures,
-      venue_14d.backend_draws_observed,
-      venue_14d.latest_backend_frame_sequence,
+      venue_14d.backend_draws_observed, venue_14d.latest_backend_frame_sequence,
       venue_14d.backend_pixel_hash_matches,
-      venue_14d.backend_shader_pair_matches,
-      venue_14d.backend_events,
+      venue_14d.backend_shader_pair_matches, venue_14d.backend_events,
       venue_14d.backend_frames_analyzed,
       venue_14d.backend_events_without_title_frame,
       venue_14d.backend_tile_blocks_matched, venue_14d.pending_frames,
       venue_14d.queued_backend_events, venue_14d.finalized_frames,
       venue_14d.valid_frames, venue_14d.expired_frames,
-      venue_14d.backend_sequence_mismatches,
-      player_6ae.title_candidates, player_6ae.admitted_draws,
-      player_6ae.backend_events,
-      player_6ae.backend_tile_blocks_matched,
-      player_6ae.pending_frames, player_6ae.queued_backend_events,
-      player_6ae.finalized_frames, player_6ae.valid_frames,
-      player_6ae.rejected_frames, player_6ae.expired_frames,
-      player_6ae.backend_sequence_mismatches,
+      venue_14d.backend_sequence_mismatches, player_6ae.title_candidates,
+      player_6ae.admitted_draws, player_6ae.backend_events,
+      player_6ae.backend_tile_blocks_matched, player_6ae.pending_frames,
+      player_6ae.queued_backend_events, player_6ae.finalized_frames,
+      player_6ae.valid_frames, player_6ae.rejected_frames,
+      player_6ae.expired_frames, player_6ae.backend_sequence_mismatches,
       net_bb903.title_draws_observed, net_bb903.title_candidates,
       net_bb903.valid_title_draws, net_bb903.title_missing_mesh,
-      net_bb903.title_missing_textures,
-      net_bb903.latest_backend_frame_sequence,
+      net_bb903.title_missing_textures, net_bb903.latest_backend_frame_sequence,
       net_bb903.backend_events_joined,
       net_bb903.backend_events_without_title_frame,
       net_bb903.backend_content_hash_matches,
@@ -219,22 +206,18 @@ void LogReadiness(const TableTennisFrameScene &scene) {
       net_bb903.backend_eligibility_pixel_hash_matches,
       net_bb903.backend_eligibility_content_shape_matches,
       net_bb903.backend_eligibility_eligible_matches,
-      net_bb903.backend_frames_analyzed,
-      net_bb903.backend_tile_blocks_matched, net_bb903.pending_frames,
-      net_bb903.queued_backend_events, net_bb903.finalized_frames,
-      net_bb903.observer_complete_frames, net_bb903.expired_frames,
-      net_bb903.backend_sequence_mismatches,
+      net_bb903.backend_frames_analyzed, net_bb903.backend_tile_blocks_matched,
+      net_bb903.pending_frames, net_bb903.queued_backend_events,
+      net_bb903.finalized_frames, net_bb903.observer_complete_frames,
+      net_bb903.expired_frames, net_bb903.backend_sequence_mismatches,
       palette.valid_write_count, palette.write_attempt_count,
       palette.rejected_write_count, palette.d47_contract_draw_count,
       palette_player_0, palette_destination_0, palette_player_1,
-      palette_destination_1,
-      ready.table_owner_observed,
+      palette_destination_1, ready.table_owner_observed,
       ready.ball_owner_observed, ready.paddle_owner_observed,
-      ready.hud_batch_count,
-      ready.hud_texture_bind_count, ready.hud_capture_valid,
-      ready.hud_complete,
-      ready.net_bb903_draw_count, ready.net_bb903_observer_complete,
-      ready.net_bb903_ready_to_serve,
+      ready.hud_batch_count, ready.hud_texture_bind_count,
+      ready.hud_capture_valid, ready.hud_complete, ready.net_bb903_draw_count,
+      ready.net_bb903_observer_complete, ready.net_bb903_ready_to_serve,
       ready.exact_frame_components, ready.stale_component_count,
       ready.consecutive_complete_frames, ready.takeover_ready);
   REXLOG_INFO(
@@ -254,15 +237,12 @@ void LogReadiness(const TableTennisFrameScene &scene) {
       venue_e33.title_renderer_texture_shape_matches,
       venue_e33.backend_rasterizer_contract_matches,
       venue_e33.latest_rasterizer_mode_control,
-      venue_e33.capture_generation_mismatches,
-      venue_e33.backend_draws_observed,
+      venue_e33.capture_generation_mismatches, venue_e33.backend_draws_observed,
       venue_e33.backend_pixel_hash_matches,
-      venue_e33.backend_shader_pair_matches,
-      venue_e33.backend_contract_matches, venue_e33.backend_events,
-      venue_e33.backend_events_stale,
+      venue_e33.backend_shader_pair_matches, venue_e33.backend_contract_matches,
+      venue_e33.backend_events, venue_e33.backend_events_stale,
       venue_e33.backend_tile_blocks_matched, venue_e33.proof_frames,
-      venue_e33.learned_generation,
-      venue_e33.learned_unique_program_count,
+      venue_e33.learned_generation, venue_e33.learned_unique_program_count,
       venue_e33.finalized_frames, venue_e33.valid_frames,
       venue_e33.capture_frames_rejected, venue_e33.expired_frames,
       venue_e33.backend_sequence_mismatches, venue_e33.pending_frames,
@@ -281,12 +261,10 @@ void LogReadiness(const TableTennisFrameScene &scene) {
       "Table Tennis E33 title gate: base={} topology={} stride={} endian={} "
       "index_layout={} bounds={} identity={} declaration={} candidates={} "
       "observer_only=true",
-      venue_e33.title_base_structure_matches,
-      venue_e33.title_topology_matches,
+      venue_e33.title_base_structure_matches, venue_e33.title_topology_matches,
       venue_e33.title_stride_matches, venue_e33.title_endian_matches,
       venue_e33.title_index_layout_matches,
-      venue_e33.title_buffer_bounds_matches,
-      venue_e33.title_identity_matches,
+      venue_e33.title_buffer_bounds_matches, venue_e33.title_identity_matches,
       venue_e33.title_declaration_matches, venue_e33.title_candidates);
 }
 
@@ -297,8 +275,12 @@ bool NativeFrameSceneCaptureEnabled() {
   // same immutable family publications. Either one must arm the complete
   // capture graph even if the older master scene cvar is off.
   return REXCVAR_GET(tabletennis_native_frame_scene_capture) ||
-         MainCoverageLedgerEnabled() ||
-         NativeSceneTransactionObserverEnabled();
+         MainCoverageLedgerEnabled() || NativeSceneTransactionObserverEnabled();
+}
+
+bool NativeFrameSceneFullCaptureEnabled() {
+  return REXCVAR_GET(tabletennis_native_frame_scene_capture) ||
+         MainCoverageLedgerEnabled();
 }
 
 void NativeFrameSceneFrameEnd() {
@@ -334,8 +316,7 @@ void NativeFrameSceneFrameEnd() {
       LatestHudSwfFrameSnapshot();
   const std::shared_ptr<const NetBB903FrameSnapshot> latest_net =
       LatestNetBB903FrameSnapshot();
-  const SceneOwnerObserverFrame latest_owners =
-      LatestSceneOwnerObserverFrame();
+  const SceneOwnerObserverFrame latest_owners = LatestSceneOwnerObserverFrame();
 
   TableTennisFrameScene scene;
   {
@@ -355,20 +336,13 @@ void NativeFrameSceneFrameEnd() {
         pending->catalog = latest_catalog;
       }
     }
-    AttachPendingFrame(latest_venue_ps328,
-                       &TableTennisFrameScene::venue_ps328);
-    AttachPendingFrame(latest_venue_14d,
-                       &TableTennisFrameScene::venue_14d);
-    AttachPendingFrame(latest_venue_e33,
-                       &TableTennisFrameScene::venue_e33);
-    AttachPendingFrame(latest_crowd_c6,
-                       &TableTennisFrameScene::crowd_c6);
-    AttachPendingFrame(latest_player_ca9,
-                       &TableTennisFrameScene::player_ca9);
-    AttachPendingFrame(latest_player_d47,
-                       &TableTennisFrameScene::player_d47);
-    AttachPendingFrame(latest_player_6ae,
-                       &TableTennisFrameScene::player_6ae);
+    AttachPendingFrame(latest_venue_ps328, &TableTennisFrameScene::venue_ps328);
+    AttachPendingFrame(latest_venue_14d, &TableTennisFrameScene::venue_14d);
+    AttachPendingFrame(latest_venue_e33, &TableTennisFrameScene::venue_e33);
+    AttachPendingFrame(latest_crowd_c6, &TableTennisFrameScene::crowd_c6);
+    AttachPendingFrame(latest_player_ca9, &TableTennisFrameScene::player_ca9);
+    AttachPendingFrame(latest_player_d47, &TableTennisFrameScene::player_d47);
+    AttachPendingFrame(latest_player_6ae, &TableTennisFrameScene::player_6ae);
     AttachPendingFrame(latest_hud, &TableTennisFrameScene::hud_swf);
     AttachPendingFrame(latest_net, &TableTennisFrameScene::net_bb903);
     if (TableTennisFrameScene *const pending =
@@ -381,13 +355,13 @@ void NativeFrameSceneFrameEnd() {
       g_pending_scenes.pop_front();
     }
 
-    const auto joined = std::find_if(
-        g_pending_scenes.rbegin(), g_pending_scenes.rend(),
-        [](const TableTennisFrameScene &candidate) {
-          return CompositionComponentsJoined(candidate);
-        });
-    scene = joined != g_pending_scenes.rend() ? *joined
-                                              : g_pending_scenes.back();
+    const auto joined =
+        std::find_if(g_pending_scenes.rbegin(), g_pending_scenes.rend(),
+                     [](const TableTennisFrameScene &candidate) {
+                       return CompositionComponentsJoined(candidate);
+                     });
+    scene =
+        joined != g_pending_scenes.rend() ? *joined : g_pending_scenes.back();
   }
   scene.generation = ++g_generation;
   scene.readiness = {};
@@ -398,10 +372,8 @@ void NativeFrameSceneFrameEnd() {
     ready.catalog_current =
         CurrentCatalog(*scene.catalog, scene.title.sequence);
     ready.catalog_draw_count = scene.catalog->ordered_draw_count;
-    ready.catalog_dropped_draw_count =
-        scene.catalog->dropped_ordered_draws;
-    ready.catalog_guest_read_failures =
-        scene.catalog->guest_read_failures;
+    ready.catalog_dropped_draw_count = scene.catalog->dropped_ordered_draws;
+    ready.catalog_guest_read_failures = scene.catalog->guest_read_failures;
   }
 
   const bool venue_ps328_current =
@@ -418,24 +390,19 @@ void NativeFrameSceneFrameEnd() {
       SameTitleFrame(scene.player_d47, scene.title.sequence);
   const bool player_6ae_current =
       SameTitleFrame(scene.player_6ae, scene.title.sequence);
-  const bool hud_current =
-      SameTitleFrame(scene.hud_swf, scene.title.sequence);
+  const bool hud_current = SameTitleFrame(scene.hud_swf, scene.title.sequence);
   const bool net_bb903_current =
       SameTitleFrame(scene.net_bb903, scene.title.sequence);
-  const bool owners_current =
-      scene.title.sequence != 0 &&
-      scene.owners.sequence == scene.title.sequence;
+  const bool owners_current = scene.title.sequence != 0 &&
+                              scene.owners.sequence == scene.title.sequence;
   ready.stale_component_count =
       static_cast<uint32_t>(scene.catalog != nullptr &&
                             scene.catalog->sequence != scene.title.sequence) +
       static_cast<uint32_t>(scene.venue_ps328 != nullptr &&
                             !venue_ps328_current) +
-      static_cast<uint32_t>(scene.venue_14d != nullptr &&
-                            !venue_14d_current) +
-      static_cast<uint32_t>(scene.venue_e33 != nullptr &&
-                            !venue_e33_current) +
-      static_cast<uint32_t>(scene.crowd_c6 != nullptr &&
-                            !crowd_c6_current) +
+      static_cast<uint32_t>(scene.venue_14d != nullptr && !venue_14d_current) +
+      static_cast<uint32_t>(scene.venue_e33 != nullptr && !venue_e33_current) +
+      static_cast<uint32_t>(scene.crowd_c6 != nullptr && !crowd_c6_current) +
       static_cast<uint32_t>(scene.player_ca9 != nullptr &&
                             !player_ca9_current) +
       static_cast<uint32_t>(scene.player_d47 != nullptr &&
@@ -443,12 +410,11 @@ void NativeFrameSceneFrameEnd() {
       static_cast<uint32_t>(scene.player_6ae != nullptr &&
                             !player_6ae_current) +
       static_cast<uint32_t>(scene.hud_swf != nullptr && !hud_current) +
-      static_cast<uint32_t>(scene.net_bb903 != nullptr &&
-                            !net_bb903_current) +
+      static_cast<uint32_t>(scene.net_bb903 != nullptr && !net_bb903_current) +
       static_cast<uint32_t>(scene.owners.sequence != 0 && !owners_current);
-  ready.exact_frame_components =
-      ready.catalog_current && owners_current && hud_current &&
-      ready.stale_component_count == 0;
+  ready.exact_frame_components = ready.catalog_current && owners_current &&
+                                 hud_current &&
+                                 ready.stale_component_count == 0;
 
   ready.venue_ps328_draw_count = DrawCount(scene.venue_ps328);
   ready.venue_14d_draw_count =
@@ -477,10 +443,8 @@ void NativeFrameSceneFrameEnd() {
     ready.hud_capture_valid = hud_current && scene.hud_swf->valid();
   }
   if (scene.net_bb903 != nullptr) {
-    ready.net_bb903_draw_count =
-        NetBB903FrameSnapshot::kContentDrawCount;
-    ready.net_bb903_observer_complete =
-        scene.net_bb903->observer_complete();
+    ready.net_bb903_draw_count = NetBB903FrameSnapshot::kContentDrawCount;
+    ready.net_bb903_observer_complete = scene.net_bb903->observer_complete();
     ready.net_bb903_ready_to_serve =
         net_bb903_current && scene.net_bb903->ready_to_serve();
   }
@@ -508,16 +472,14 @@ void NativeFrameSceneFrameEnd() {
   ready.player_6ae_complete =
       player_6ae_current && scene.player_6ae->valid() &&
       ready.player_6ae_draw_count == kExpectedPlayer6AEDrawCount;
-  const bool owner_frame_valid =
-      owners_current &&
-      scene.owners.guest_read_failure_count == 0 &&
-      scene.owners.dropped_identity_count == 0;
+  const bool owner_frame_valid = owners_current &&
+                                 scene.owners.guest_read_failure_count == 0 &&
+                                 scene.owners.dropped_identity_count == 0;
   ready.table_owner_observed =
       owner_frame_valid && scene.owners.table_render_scope_count != 0;
   ready.ball_owner_observed =
-      owner_frame_valid &&
-      (scene.owners.ball_render_scope_count != 0 ||
-       scene.owners.ball_transform_count != 0);
+      owner_frame_valid && (scene.owners.ball_render_scope_count != 0 ||
+                            scene.owners.ball_transform_count != 0);
   ready.paddle_owner_observed =
       owner_frame_valid && scene.owners.paddle_render_scope_count != 0;
 
@@ -540,9 +502,8 @@ void NativeFrameSceneFrameEnd() {
   // Deliberately remains false until the remaining material families and the
   // 2D replay list have exact immutable captures. Partial native frames are
   // evidence, never output.
-  ready.main_complete =
-      ready.exact_frame_components &&
-      ready.reference_missing_main_draw_count == 0;
+  ready.main_complete = ready.exact_frame_components &&
+                        ready.reference_missing_main_draw_count == 0;
   // The immutable draw list is now observed, but texture payload/state replay
   // is not implemented yet. Observation must not unlock takeover by itself.
   ready.hud_complete = false;
@@ -551,9 +512,8 @@ void NativeFrameSceneFrameEnd() {
   g_consecutive_complete_frames =
       complete ? g_consecutive_complete_frames + 1 : 0;
   ready.consecutive_complete_frames = g_consecutive_complete_frames;
-  ready.takeover_ready =
-      complete &&
-      g_consecutive_complete_frames >= kRequiredConsecutiveCompleteFrames;
+  ready.takeover_ready = complete && g_consecutive_complete_frames >=
+                                         kRequiredConsecutiveCompleteFrames;
 
   const uint32_t log_interval =
       REXCVAR_GET(tabletennis_native_frame_scene_log_interval);

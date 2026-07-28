@@ -2,6 +2,7 @@
 
 #include "native/tabletennis_scene_draw_catalog.h"
 #include "native/tabletennis_texture_snapshot.h"
+#include "native/tabletennis_vertex_declaration.h"
 
 #include <array>
 #include <cstdint>
@@ -13,6 +14,11 @@ namespace tabletennis::native {
 // Immutable host-endian geometry copied while the streaming-owned guest
 // buffers are live.
 struct VenueMeshSnapshot {
+  // Exact guest payloads are retained alongside the decoded reference-renderer
+  // streams. Generic translated replay consumes these bytes; reconstructing
+  // them from floats would lose endian/layout identity.
+  std::vector<uint8_t> raw_vertex_bytes;
+  std::vector<uint8_t> raw_index_bytes;
   std::vector<std::array<float, 3>> positions;
   std::vector<std::array<float, 2>> texcoords0;
   std::vector<std::array<float, 2>> texcoords1;
@@ -21,13 +27,24 @@ struct VenueMeshSnapshot {
   uint32_t primitive_type = 0;
   uint32_t source_vertex_alias = 0;
   uint32_t source_index_alias = 0;
+  uint32_t source_index_physical_address = 0;
   uint32_t source_vertex_stride = 0;
   uint32_t submitted_index_count = 0;
+  uint32_t minimum_index = 0;
+  uint32_t maximum_index = 0;
   uint64_t vertex_fingerprint = 0;
   uint64_t index_fingerprint = 0;
 
   bool valid() const {
-    return !positions.empty() &&
+    return !raw_vertex_bytes.empty() && !raw_index_bytes.empty() &&
+           source_vertex_stride != 0 &&
+           source_index_physical_address != 0 &&
+           raw_vertex_bytes.size() ==
+               positions.size() * source_vertex_stride &&
+           raw_index_bytes.size() ==
+               submitted_index_count * sizeof(uint16_t) &&
+           minimum_index <= maximum_index &&
+           maximum_index < positions.size() && !positions.empty() &&
            texcoords0.size() == positions.size() &&
            texcoords1.size() == positions.size() &&
            colors.size() == positions.size() && !indices.empty() &&
@@ -37,6 +54,7 @@ struct VenueMeshSnapshot {
 
 struct VenueMaterialSnapshot {
   uint32_t vertex_declaration = 0;
+  VertexDeclarationProbe vertex_declaration_identity{};
   std::array<std::array<uint32_t, 6>, 2> texture_fetches{};
   std::array<float, 28> vertex_constants_0_6{};
   std::array<float, 16> vertex_constants_12_15{};

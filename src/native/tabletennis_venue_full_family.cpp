@@ -2,8 +2,12 @@
 
 #include "native/tabletennis_frame_scene.h"
 #include "native/tabletennis_main_coverage_ledger.h"
+#include "native/tabletennis_ps328_tile_invariance.h"
+#include "native/tabletennis_translated_shader_artifact_store.h"
 #include <cstddef>
+#include <deque>
 #include <mutex>
+#include <ranges>
 #include <string>
 #include <utility>
 
@@ -26,10 +30,12 @@ namespace tabletennis::native {
 namespace {
 
 constexpr size_t kMaximumFullFamilyDraws = 256;
+constexpr size_t kMaximumRetainedFullFamilyFrames = 8;
 
 std::mutex g_full_family_mutex;
 VenueFullFamilyFrame g_building_frame;
 std::shared_ptr<const VenueFullFamilyFrame> g_published_frame;
+std::deque<std::shared_ptr<const VenueFullFamilyFrame>> g_frame_history;
 size_t g_largest_logged_family = 0;
 
 std::string OrderedCountList(const VenueFullFamilyFrame &frame) {
@@ -49,7 +55,10 @@ std::string OrderedCountList(const VenueFullFamilyFrame &frame) {
 bool VenueFullFamilyObserverEnabled() {
   return REXCVAR_GET(tabletennis_native_venue_full_family_observer) ||
          VenueFullFamilyOverlayEnabled() ||
-         NativeFrameSceneCaptureEnabled();
+         MainCoverageLedgerEnabled() ||
+         (!Ps328TitleCaptureRetired() &&
+          (NativeFrameSceneCaptureEnabled() ||
+           TranslatedShaderArtifactStoreEnabled()));
 }
 
 bool VenueFullFamilyOverlayEnabled() {
@@ -95,6 +104,7 @@ void VenueFullFamilyFrameEnd() {
   if (!enabled) {
     g_building_frame = {};
     g_published_frame.reset();
+    g_frame_history.clear();
     g_largest_logged_family = 0;
     return;
   }
@@ -104,6 +114,10 @@ void VenueFullFamilyFrameEnd() {
   } else {
     g_published_frame = std::make_shared<const VenueFullFamilyFrame>(
         std::move(g_building_frame));
+    g_frame_history.push_back(g_published_frame);
+    while (g_frame_history.size() > kMaximumRetainedFullFamilyFrames) {
+      g_frame_history.pop_front();
+    }
     ObserveMainCoverageFamilyFrame(g_published_frame);
     if (g_published_frame->draws.size() > g_largest_logged_family) {
       g_largest_logged_family = g_published_frame->draws.size();
@@ -125,7 +139,7 @@ void VenueFullFamilyFrameEnd() {
       if (g_published_frame->copy_failures != 0) {
         for (size_t index = 0; index < g_published_frame->draws.size();
              ++index) {
-          const VenueFullFamilyDrawSnapshot& draw =
+          const VenueFullFamilyDrawSnapshot &draw =
               g_published_frame->draws[index];
           if (draw.valid()) {
             continue;
@@ -133,10 +147,8 @@ void VenueFullFamilyFrameEnd() {
           REXLOG_INFO(
               "  full_ps328_copy_failure position={} ordinal={} "
               "indices={} mesh={} material={} vb={:08X} ib={:08X}",
-              index, draw.source.ordinal,
-              draw.source.submitted_index_count,
-              draw.captured.mesh != nullptr &&
-                  draw.captured.mesh->valid(),
+              index, draw.source.ordinal, draw.source.submitted_index_count,
+              draw.captured.mesh != nullptr && draw.captured.mesh->valid(),
               draw.captured.material.valid,
               draw.source.mesh.vertex_buffer_alias,
               draw.source.mesh.index_buffer_alias);
@@ -150,6 +162,20 @@ void VenueFullFamilyFrameEnd() {
 std::shared_ptr<const VenueFullFamilyFrame> LatestVenueFullFamilyFrame() {
   std::lock_guard lock(g_full_family_mutex);
   return g_published_frame;
+}
+
+std::shared_ptr<const VenueFullFamilyFrame>
+VenueFullFamilyFrameForSequence(uint64_t sequence) {
+  if (sequence == 0) {
+    return nullptr;
+  }
+  std::lock_guard lock(g_full_family_mutex);
+  const auto found = std::ranges::find(
+      g_frame_history, sequence,
+      [](const std::shared_ptr<const VenueFullFamilyFrame> &frame) {
+        return frame != nullptr ? frame->sequence : 0;
+      });
+  return found != g_frame_history.end() ? *found : nullptr;
 }
 
 } // namespace tabletennis::native

@@ -23,7 +23,10 @@ namespace texture_conversion = rex::graphics::texture_conversion;
 namespace texture_util = rex::graphics::texture_util;
 namespace xenos = rex::graphics::xenos;
 
-constexpr size_t kMaximumSnapshots = 256;
+// The title keeps several immutable HUD/material frame publications alive
+// while the translated backend catches up. 256 entries was smaller than that
+// legitimate live working set and turned the cache into a correctness gate.
+constexpr size_t kMaximumSnapshots = 1024;
 constexpr size_t kMaximumGuestTextureBytes = 64 * 1024 * 1024;
 constexpr size_t kMaximumSnapshotPayloadBytes = 64 * 1024 * 1024;
 constexpr size_t kMaximumSnapshotCacheBytes = 512 * 1024 * 1024;
@@ -32,6 +35,37 @@ constexpr uint32_t kPhysicalAddressMask = 0x1FFFFFFFu;
 
 std::mutex g_texture_snapshot_mutex;
 std::vector<std::shared_ptr<const TextureSnapshot>> g_texture_snapshots;
+bool g_logged_texture_cache_exhaustion = false;
+uint64_t g_texture_snapshot_capture_count = 0;
+uint64_t g_texture_snapshot_success_logs_suppressed = 0;
+
+size_t CachedPayloadBytes() {
+  return std::accumulate(
+      g_texture_snapshots.begin(), g_texture_snapshots.end(), size_t{0},
+      [](size_t total, const auto &snapshot) {
+        return total + snapshot->linear_blocks.size();
+      });
+}
+
+void EvictUnreferencedSnapshotsFor(size_t requested_bytes,
+                                   bool adding_entry) {
+  size_t cached_bytes = CachedPayloadBytes();
+  for (auto snapshot = g_texture_snapshots.begin();
+       snapshot != g_texture_snapshots.end() &&
+       ((adding_entry && g_texture_snapshots.size() >= kMaximumSnapshots) ||
+        requested_bytes >
+            kMaximumSnapshotCacheBytes -
+                std::min(cached_bytes, kMaximumSnapshotCacheBytes));) {
+    // Immutable family/frame publications retain the snapshots they still
+    // need. A cache-only entry is old observer data and can be dropped safely.
+    if (snapshot->use_count() == 1) {
+      cached_bytes -= (*snapshot)->linear_blocks.size();
+      snapshot = g_texture_snapshots.erase(snapshot);
+    } else {
+      ++snapshot;
+    }
+  }
+}
 
 uint64_t Fingerprint(const uint8_t *bytes, size_t size) {
   uint64_t hash = 1469598103934665603ull;
@@ -442,13 +476,11 @@ std::shared_ptr<const TextureSnapshot> CaptureTextureSnapshot(
     return nullptr;
   }
 
+  uint64_t capture_count = 0;
+  uint64_t suppressed_success_logs = 0;
+  bool log_capture = false;
   {
     std::lock_guard lock(g_texture_snapshot_mutex);
-    size_t cached_bytes =
-        std::accumulate(g_texture_snapshots.begin(), g_texture_snapshots.end(),
-                        size_t{0}, [](size_t total, const auto &existing) {
-                          return total + existing->linear_blocks.size();
-                        });
     const auto duplicate = std::find_if(
         g_texture_snapshots.begin(), g_texture_snapshots.end(),
         [&](const auto &existing) {
@@ -463,38 +495,60 @@ std::shared_ptr<const TextureSnapshot> CaptureTextureSnapshot(
     if (duplicate != g_texture_snapshots.end() && !upgrades_mip0) {
       return *duplicate;
     }
+    const bool adds_entry = duplicate == g_texture_snapshots.end();
+    if (adds_entry) {
+      EvictUnreferencedSnapshotsFor(snapshot->linear_blocks.size(), true);
+    }
+    size_t cached_bytes = CachedPayloadBytes();
     if (upgrades_mip0) {
       cached_bytes -= (*duplicate)->linear_blocks.size();
     }
-    const bool adds_entry = duplicate == g_texture_snapshots.end();
     if ((adds_entry && g_texture_snapshots.size() >= kMaximumSnapshots) ||
         snapshot->linear_blocks.size() >
             kMaximumSnapshotCacheBytes -
                 std::min(cached_bytes, kMaximumSnapshotCacheBytes)) {
-      REXLOG_ERROR("Table Tennis texture snapshot: cache budget exhausted "
-                   "(entries={}/{}, bytes={}/{}, requested={})",
-                   g_texture_snapshots.size(), kMaximumSnapshots, cached_bytes,
-                   kMaximumSnapshotCacheBytes, snapshot->linear_blocks.size());
-      return nullptr;
+      if (!g_logged_texture_cache_exhaustion) {
+        g_logged_texture_cache_exhaustion = true;
+        REXLOG_ERROR("Table Tennis texture snapshot: cache budget exhausted "
+                     "(entries={}/{}, bytes={}/{}, requested={}); "
+                     "publishing uncached snapshots and suppressing further "
+                     "failures",
+                     g_texture_snapshots.size(), kMaximumSnapshots,
+                     cached_bytes, kMaximumSnapshotCacheBytes,
+                     snapshot->linear_blocks.size());
+      }
+      // The cache is an optimization. A fully decoded, double-read-verified
+      // immutable snapshot remains valid even if the cache can't retain it.
+      return snapshot;
     }
     if (upgrades_mip0) {
       *duplicate = snapshot;
     } else {
       g_texture_snapshots.push_back(snapshot);
     }
+    capture_count = ++g_texture_snapshot_capture_count;
+    log_capture = capture_count <= 8 || (capture_count % 256) == 0;
+    if (log_capture) {
+      suppressed_success_logs = g_texture_snapshot_success_logs_suppressed;
+      g_texture_snapshot_success_logs_suppressed = 0;
+    } else {
+      ++g_texture_snapshot_success_logs_suppressed;
+    }
   }
 
-  REXLOG_INFO("Table Tennis texture snapshot: captured owner={:08X} "
-              "handle={:08X} "
-              "{}x{} layers={} dimension={} format={} levels=0-{} "
-              "packed={} tiled={} row_bytes={} "
-              "payload={:016X} "
-              "observer-only",
-              snapshot->owner_shader, snapshot->encoded_handle, snapshot->width,
-              snapshot->height, snapshot->layer_count, snapshot->dimension,
-              snapshot->format, snapshot->mips.size() - 1,
-              snapshot->has_packed_mips, snapshot->is_tiled,
-              snapshot->row_pitch_bytes, snapshot->payload_fingerprint);
+  if (log_capture) {
+    REXLOG_INFO(
+        "Table Tennis texture snapshot: captured milestone={} "
+        "suppressed_success_logs={} owner={:08X} handle={:08X} "
+        "{}x{} layers={} dimension={} format={} levels=0-{} "
+        "packed={} tiled={} row_bytes={} payload={:016X} observer-only",
+        capture_count, suppressed_success_logs, snapshot->owner_shader,
+        snapshot->encoded_handle, snapshot->width, snapshot->height,
+        snapshot->layer_count, snapshot->dimension, snapshot->format,
+        snapshot->mips.size() - 1, snapshot->has_packed_mips,
+        snapshot->is_tiled, snapshot->row_pitch_bytes,
+        snapshot->payload_fingerprint);
+  }
   return snapshot;
 }
 

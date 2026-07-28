@@ -12,6 +12,8 @@ namespace tabletennis::native {
 
 struct SceneCatalogDrawOccurrence;
 
+inline constexpr uint32_t kPlayer6AEVertexEndian = 2;
+
 struct Player6AEVertexFetch {
   uint32_t slot = 0;
   uint32_t physical_address = 0;
@@ -75,18 +77,31 @@ struct Player6AEPalettePayload {
 };
 
 struct Player6AEMaterialSnapshot {
-  static constexpr size_t kTextureBindingCount = 6;
+  static constexpr size_t kTextureFetchSlotCount = 6;
   static constexpr size_t kMaterialTextureCount = 3;
+  static constexpr size_t kSharedTextureCount = 3;
   static constexpr std::array<uint32_t, kMaterialTextureCount>
-      kMaterialTextureBindings = {0, 1, 5};
+      kMaterialTextureFetchSlots = {1, 2, 0};
+  static constexpr std::array<uint32_t, kSharedTextureCount>
+      kSharedTextureFetchSlots = {5, 3, 4};
 
-  std::array<std::array<uint32_t, 6>, kTextureBindingCount> texture_fetches{};
-  std::array<uint32_t, kTextureBindingCount> texture_view_swizzles{};
-  // Bindings 0, 1 and 5 are the changing material images. Bindings 2-4 are
-  // retained as exact descriptors for the shared mask, depth and lookup
-  // inputs, without copying those frame-global resources into every draw.
+  std::array<std::array<uint32_t, 6>, kTextureFetchSlotCount> texture_fetches{};
+  std::array<uint32_t, kTextureFetchSlotCount> texture_view_swizzles{};
+  std::array<bool, kTextureFetchSlotCount> sampler_contracts_valid{};
+  // Fetch slots 0-2 are the changing material images. Fetch slots 5, 3 and 4
+  // are the frame-shared mask, resolved screen-depth and lookup inputs. The
+  // array orders above follow the shader's unique-binding order, which is not
+  // the same as the Xenos fetch-slot number. Every immutable payload is
+  // retained by the draw snapshot, while the generic texture cache
+  // de-duplicates identical references. The shared handles are frame-keyed
+  // because fetch slot 3 is dynamic even when its fetch words and guest
+  // storage address remain unchanged. Within that strict frame boundary, the
+  // exact immutable slot-5 mask and slot-4 32x32 lookup contracts share a
+  // canonical owner; dynamic depth retains pass ownership and stays fresh.
   std::array<std::shared_ptr<const TextureSnapshot>, kMaterialTextureCount>
       material_textures{};
+  std::array<std::shared_ptr<const TextureSnapshot>, kSharedTextureCount>
+      shared_textures{};
 
   std::array<float, 16> vertex_constants_12_15{};
   std::array<float, 4> vertex_constant_19{};
@@ -99,6 +114,8 @@ struct Player6AEMaterialSnapshot {
   std::array<float, 100> pixel_constants_46_70{};
   std::array<float, 8> pixel_constants_254_255{};
   bool literal_contract_valid = false;
+  bool sampler_contract_valid = false;
+  bool shared_resource_ownership_valid = false;
   bool valid = false;
 };
 
@@ -106,10 +123,15 @@ struct Player6AEDrawIdentity {
   uint32_t primitive_type = 0;
   uint32_t submitted_index_count = 0;
   uint32_t guest_index_base = 0;
+  uint32_t guest_vertex_base = 0;
+  uint32_t guest_vertex_bytes = 0;
+  uint32_t guest_vertex_endian = 0;
 
   bool valid() const {
     return primitive_type != 0 && submitted_index_count != 0 &&
-           guest_index_base != 0;
+           guest_index_base != 0 && guest_vertex_base != 0 &&
+           guest_vertex_bytes >= 36 && guest_vertex_bytes % 36 == 0 &&
+           guest_vertex_endian == kPlayer6AEVertexEndian;
   }
   bool operator==(const Player6AEDrawIdentity&) const = default;
 };
@@ -123,7 +145,15 @@ struct Player6AEBackendContract {
   uint32_t normalized_color_mask = 0;
   uint32_t color_control = 0;
   uint32_t blend_control_0 = 0;
+  uint32_t rasterizer_mode_control = 0;
   uint32_t primitive_restart_index = 0;
+  uint32_t rb_color_info_0 = 0;
+  uint32_t rb_depth_info = 0;
+  uint32_t rb_surface_info = 0;
+  uint32_t rb_modecontrol = 0;
+  uint32_t color_edram_base = 0;
+  uint32_t depth_edram_base = 0;
+  uint32_t edram_mode = 0;
   std::array<uint32_t, 4> color_attachment_formats{};
   uint32_t color_attachment_count = 0;
   uint32_t depth_attachment_format = 0;
@@ -131,6 +161,8 @@ struct Player6AEBackendContract {
   uint32_t sample_count = 0;
   uint64_t sample_mask = 0;
   bool primitive_restart_enabled = false;
+  bool rasterizer_mode_control_valid = false;
+  bool render_target_state_valid = false;
   bool valid = false;
 };
 
@@ -164,6 +196,9 @@ struct Player6AETitleCapture {
   uint32_t guest_read_failures = 0;
   uint32_t payload_copy_failures = 0;
   uint32_t texture_capture_failures = 0;
+  uint32_t sampler_contract_failures = 0;
+  uint32_t sampler_contract_failure_mask = 0;
+  uint32_t shared_resource_capture_failures = 0;
   bool fetch_contract_valid = false;
   bool family_candidate = false;
 };

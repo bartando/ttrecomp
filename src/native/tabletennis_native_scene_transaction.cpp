@@ -51,6 +51,7 @@ struct TransactionTelemetry {
   uint64_t player_ca9_sequence = 0;
   uint32_t planned_draws = 0;
   uint32_t recorded_draws = 0;
+  uint32_t failed_family_draw_index = 0;
   NativeSceneCompositionRejectReason plan_reject =
       NativeSceneCompositionRejectReason::kMissingScene;
   NativeSceneDrawFamily failed_family = NativeSceneDrawFamily::kVenuePs328;
@@ -124,7 +125,8 @@ void PublishAndMaybeLog(TransactionTelemetry telemetry) {
   REXLOG_INFO(
       "Table Tennis native scene transaction observer: frame={} result={} "
       "planned={} recorded={} plan_reject={} failed_family={} "
-      "failed_ordinal={} detail={} component_frames[catalog={} ps328={} "
+      "failed_draw_index={} failed_ordinal={} detail={} "
+      "component_frames[catalog={} ps328={} "
       "14d={} c6={} ca9={}] private_target=true resolved=false "
       "guest_suppressed=false",
       telemetry.sequence, TransactionResultName(telemetry.result),
@@ -133,7 +135,8 @@ void PublishAndMaybeLog(TransactionTelemetry telemetry) {
       telemetry.failed_ordinal != 0
           ? NativeSceneDrawFamilyName(telemetry.failed_family)
           : "none",
-      telemetry.failed_ordinal, telemetry.detail,
+      telemetry.failed_family_draw_index, telemetry.failed_ordinal,
+      telemetry.detail,
       telemetry.catalog_sequence, telemetry.venue_ps328_sequence,
       telemetry.venue_14d_sequence, telemetry.crowd_c6_sequence,
       telemetry.player_ca9_sequence);
@@ -220,6 +223,10 @@ void ObserveNativeSceneTransaction(
   telemetry.sequence = plan.readiness.title_sequence;
   telemetry.planned_draws = static_cast<uint32_t>(plan.draws.size());
   telemetry.plan_reject = plan.readiness.reject_reason;
+  telemetry.failed_family = plan.readiness.failed_family;
+  telemetry.failed_family_draw_index =
+      plan.readiness.failed_family_draw_index;
+  telemetry.failed_ordinal = plan.readiness.failed_ordinal;
   if (plan.scene != nullptr) {
     telemetry.catalog_sequence =
         plan.scene->catalog != nullptr ? plan.scene->catalog->sequence : 0;
@@ -275,6 +282,7 @@ void ObserveNativeSceneTransaction(
 
   for (const NativeSceneDrawRef &draw : plan.draws) {
     telemetry.failed_family = draw.family;
+    telemetry.failed_family_draw_index = draw.family_draw_index;
     telemetry.failed_ordinal = draw.ordinal;
     if (!RecordDraw(context, targets, plan, draw, detail)) {
       telemetry.result = TransactionResult::kFamilyRecordFailed;
@@ -301,6 +309,7 @@ void ObserveNativeSceneTransaction(
   }
   telemetry.result = TransactionResult::kSucceeded;
   telemetry.plan_reject = NativeSceneCompositionRejectReason::kNone;
+  telemetry.failed_family_draw_index = 0;
   telemetry.failed_ordinal = 0;
   telemetry.detail = "all_draws_recorded_then_discarded";
   PublishAndMaybeLog(telemetry);

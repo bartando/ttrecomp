@@ -319,7 +319,7 @@ void LogFrame(const SceneOwnerObserverFrame &frame) {
 
 bool SceneOwnerObserverEnabled() {
   return REXCVAR_GET(tabletennis_native_scene_owner_log_interval) != 0 ||
-         NativeFrameSceneCaptureEnabled();
+         NativeFrameSceneFullCaptureEnabled();
 }
 
 void BeginSceneOwnerTableRenderScope(uint8_t *guest_base,

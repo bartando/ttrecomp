@@ -12,6 +12,9 @@ This stage is deliberately observer-only:
 - Resource allocation and uploads finish before the offscreen pass opens.
 - PS328 venue, 14D venue, C6 crowd, and CA9 player draws are recorded one at a
   time in strictly increasing title draw ordinal.
+- Delayed C6 backend proof is cloned onto the exact older immutable title
+  snapshot whose ordered block matched. A callback can never mark the newer
+  title frame currently being captured as proven.
 - Any plan, preparation, or record failure rejects the entire transaction.
 - A successful transaction is also discarded. The private target is never
   resolved into the presenter and no guest draw or guest frame is suppressed.

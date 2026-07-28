@@ -3,7 +3,6 @@
 #include "generated/default/tabletennis_init.h"
 #include "native/tabletennis_draw_constants.h"
 #include "native/tabletennis_guest_memory.h"
-#include "native/tabletennis_net_bb903_observer.h"
 #include "native/tabletennis_observer_overlay.h"
 #include "native/tabletennis_texture_snapshot.h"
 
@@ -351,7 +350,7 @@ void BeginTableMaterialDraw(uint8_t* guest_base, uint32_t shader,
 
   // Guest payload reads are fault-guarded and may copy megabytes. Never do
   // that work under the frame-observer mutex.
-  if (ObserverOverlayEnabled() || NetBB903ObserverEnabled()) {
+  if (TableMeshObserverOverlayEnabled()) {
     for (uint32_t index = 0; index < joined_texture_parameter_count; ++index) {
       TryCaptureTableTextureSnapshot(guest_base,
                                      joined_texture_parameters[index]);

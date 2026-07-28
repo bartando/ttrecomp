@@ -16,6 +16,21 @@
 
 namespace tabletennis::native {
 
+uint32_t GuestPhysicalAddressForVirtualAlias(uint32_t virtual_address) {
+  constexpr uint32_t kPhysicalAddressMask = 0x1FFFFFFF;
+  constexpr uint32_t kHighPhysicalHeapBase = 0xE0000000;
+  constexpr uint32_t kHighPhysicalHeapHostPageOffset = 0x1000;
+  if (virtual_address < kHighPhysicalHeapBase) {
+    return 0;
+  }
+  const uint64_t physical_address =
+      static_cast<uint64_t>(virtual_address - kHighPhysicalHeapBase) +
+      kHighPhysicalHeapHostPageOffset;
+  return physical_address <= kPhysicalAddressMask
+             ? static_cast<uint32_t>(physical_address)
+             : 0;
+}
+
 #if defined(_WIN32)
 namespace {
 

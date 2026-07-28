@@ -617,13 +617,41 @@ bool RecordBackendBlockMatchLocked(const CrowdBackendBlock &block,
     ++g_building_frame.backend_repeated_tile_block_count;
   }
   g_active_title_generation = title_frame.generation;
+
+  // Backend consumption trails title submission by multiple frames. Attach
+  // proof to the immutable title snapshot that actually matched this ordered
+  // block, never to the unrelated title frame currently being built.
+  if (title_frame.snapshot != nullptr && title_frame.snapshot->valid() &&
+      title_frame.snapshot->sequence == title_frame.generation) {
+    auto proven =
+        std::make_shared<CrowdFrameSnapshot>(*title_frame.snapshot);
+    proven->backend_c6_draw_count += block.draw_count;
+    proven->backend_matched_block_count = title_frame.matched_block_count;
+    proven->backend_repeated_tile_block_count =
+        g_backend_replay_run_ordinal > 1
+            ? g_backend_replay_run_ordinal - 1
+            : 0;
+    proven->backend_unique_render_pass_count =
+        title_frame.render_pass_key_count;
+    proven->backend_last_block_draw_count = block.draw_count;
+    proven->backend_last_tile_ordinal = g_backend_replay_run_ordinal;
+    proven->backend_last_title_generation = title_frame.generation;
+    proven->backend_last_sequence_fingerprint =
+        block.sequence_fingerprint;
+    proven->backend_last_contract = ContractTelemetry(block);
+    proven->backend_block_proof_observed = true;
+    title_frame.snapshot = std::move(proven);
+  }
+
+  // These fields are callback-time aggregate telemetry only. In particular,
+  // do not mark g_building_frame itself proven: it belongs to a newer title
+  // sequence than the backend block above.
   g_building_frame.backend_last_block_draw_count = block.draw_count;
   g_building_frame.backend_last_tile_ordinal = g_backend_replay_run_ordinal;
   g_building_frame.backend_last_title_generation = title_frame.generation;
   g_building_frame.backend_last_sequence_fingerprint =
       block.sequence_fingerprint;
   g_building_frame.backend_last_contract = ContractTelemetry(block);
-  g_building_frame.backend_block_proof_observed = true;
 
   const CrowdTitleDrawIdentity &first = title_frame.draws[0];
   if (!g_announced_backend_block_proof) {

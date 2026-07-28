@@ -55,7 +55,8 @@ constexpr uint32_t kTriangleStripPrimitive = 6;
 constexpr uint32_t kNativeSceneDepthControl = 0x00700736;
 constexpr uint32_t kNativeSceneColorMask = 0x00000007;
 constexpr uint32_t kNativeSceneColorControl = 0x87000005;
-constexpr uint32_t kNativeSceneBlendControl = 0x00010001;
+constexpr uint32_t kNativeSceneOpaqueBlendControl = 0x00010001;
+constexpr uint32_t kNativeSceneAlphaBlendControl = 0x07060706;
 constexpr uint32_t kNativeSceneRasterizerMode = 0x00018002;
 constexpr size_t kMaximumStaticPayloads = 256;
 constexpr size_t kMaximumTextures = 256;
@@ -126,6 +127,7 @@ struct Resources {
   nrhi::Shader *pixel_shader = nullptr;
   nrhi::Pipeline *pipeline = nullptr;
   nrhi::Pipeline *native_scene_pipeline = nullptr;
+  nrhi::Pipeline *native_scene_blended_pipeline = nullptr;
   nrhi::Format pipeline_format = nrhi::Format::kUnknown;
   nrhi::Format native_scene_color_format = nrhi::Format::kUnknown;
   nrhi::Format native_scene_depth_format = nrhi::Format::kUnknown;
@@ -139,6 +141,8 @@ struct Resources {
   bool announced_draw = false;
   bool announced_full_mips = false;
   bool announced_sampler_rejection = false;
+  bool announced_native_scene_contract_rejection = false;
+  bool announced_native_scene_data_rejection = false;
 };
 
 Resources g_resources;
@@ -147,6 +151,8 @@ void ReleaseResources() {
   if (g_resources.device != nullptr) {
     g_resources.device->DestroyDeferred(g_resources.pipeline);
     g_resources.device->DestroyDeferred(g_resources.native_scene_pipeline);
+    g_resources.device->DestroyDeferred(
+        g_resources.native_scene_blended_pipeline);
     g_resources.device->DestroyDeferred(g_resources.vertex_shader);
     g_resources.device->DestroyDeferred(g_resources.pixel_shader);
     g_resources.device->DestroyDeferred(g_resources.overlay.constant_buffer);
@@ -323,17 +329,24 @@ bool ExactSamplerFetch(const std::array<uint32_t, 6> &fetch_words,
       cube ? xenos::ClampMode::kClampToEdge : xenos::ClampMode::kRepeat;
   const xenos::DataDimension expected_dimension =
       cube ? xenos::DataDimension::kCube : xenos::DataDimension::k2DOrStacked;
-  const xenos::TextureFormat expected_format =
-      slot == 2 || cube ? xenos::TextureFormat::k_DXT4_5
-                        : xenos::TextureFormat::k_DXT1;
+  const xenos::TextureFormat base_format =
+      rex::graphics::GetBaseFormat(fetch.format);
+  const bool supported_format =
+      base_format == xenos::TextureFormat::k_DXT1 ||
+      base_format == xenos::TextureFormat::k_DXT4_5;
 
   // The plain tfetch instructions in the verified 14D shader have no
   // instruction-level filter, LOD, gradient or bias overrides, so these are
   // the effective fetch-constant states. RexGlue's guest sampler path forces
   // min/mag/mip linear when anisotropy is enabled; the two immutable NRHI
   // samplers below intentionally reproduce that normalized backend behavior.
+  // Texture compression is descriptor-owned, not slot-owned: live 14D draws
+  // bind both DXT1 and DXT5 resources at slot 2. The immutable snapshot carries
+  // the exact same six fetch words and HostTextureFormat validates the matching
+  // resource representation, so accepting either proven format does not relax
+  // sampler behavior.
   return fetch.type == xenos::FetchConstantType::kTexture &&
-         rex::graphics::GetBaseFormat(fetch.format) == expected_format &&
+         supported_format &&
          fetch.dimension == expected_dimension && !fetch.stacked &&
          fetch.clamp_x == expected_clamp && fetch.clamp_y == expected_clamp &&
          fetch.clamp_z == expected_clamp &&
@@ -627,13 +640,16 @@ bool EnsureNativeScenePipeline(
   const nrhi::Format color_format = targets.color->format();
   const nrhi::Format depth_format = targets.depth->format();
   if (g_resources.native_scene_pipeline != nullptr &&
+      g_resources.native_scene_blended_pipeline != nullptr &&
       g_resources.native_scene_color_format == color_format &&
       g_resources.native_scene_depth_format == depth_format &&
       g_resources.native_scene_sample_count == targets.sample_count) {
     return true;
   }
   context.device->DestroyDeferred(g_resources.native_scene_pipeline);
+  context.device->DestroyDeferred(g_resources.native_scene_blended_pipeline);
   g_resources.native_scene_pipeline = nullptr;
+  g_resources.native_scene_blended_pipeline = nullptr;
 
   nrhi::GraphicsPipelineDesc pipeline;
   pipeline.layout = g_resources.layout;
@@ -657,9 +673,20 @@ bool EnsureNativeScenePipeline(
   pipeline.sample_count = targets.sample_count;
   g_resources.native_scene_pipeline =
       context.device->CreateGraphicsPipeline(pipeline);
-  if (g_resources.native_scene_pipeline == nullptr) {
+  pipeline.blend.enable = true;
+  pipeline.blend.src = nrhi::BlendFactor::kSrcAlpha;
+  pipeline.blend.dst = nrhi::BlendFactor::kInvSrcAlpha;
+  pipeline.blend.op = nrhi::BlendOp::kAdd;
+  pipeline.blend.src_alpha = nrhi::BlendFactor::kSrcAlpha;
+  pipeline.blend.dst_alpha = nrhi::BlendFactor::kInvSrcAlpha;
+  pipeline.blend.op_alpha = nrhi::BlendOp::kAdd;
+  g_resources.native_scene_blended_pipeline =
+      context.device->CreateGraphicsPipeline(pipeline);
+  if (g_resources.native_scene_pipeline == nullptr ||
+      g_resources.native_scene_blended_pipeline == nullptr) {
     REXLOG_ERROR(
-        "Table Tennis 14D native scene: shared-pass pipeline creation failed");
+        "Table Tennis 14D native scene: opaque/blended shared-pass pipeline "
+        "creation failed");
     return false;
   }
   g_resources.native_scene_color_format = color_format;
@@ -709,7 +736,10 @@ bool NativeSceneBackendContractReady(const Venue14DDrawSnapshot &draw) {
          draw.backend.normalized_depth_control == kNativeSceneDepthControl &&
          draw.backend.normalized_color_mask == kNativeSceneColorMask &&
          draw.backend.color_control == kNativeSceneColorControl &&
-         draw.backend.blend_control_0 == kNativeSceneBlendControl &&
+         (draw.backend.blend_control_0 ==
+              kNativeSceneOpaqueBlendControl ||
+          draw.backend.blend_control_0 ==
+              kNativeSceneAlphaBlendControl) &&
          draw.backend.rasterizer_mode_control_valid &&
          draw.backend.rasterizer_mode_control ==
              kNativeSceneRasterizerMode &&
@@ -724,6 +754,47 @@ bool NativeSceneBackendContractReady(const Venue14DDrawSnapshot &draw) {
 bool NativeSceneFrameReady(const Venue14DFrameSnapshot &frame) {
   return frame.valid() &&
          std::ranges::all_of(frame.draws, NativeSceneBackendContractReady);
+}
+
+void LogNativeSceneContractRejection(const Venue14DFrameSnapshot &frame) {
+  if (g_resources.announced_native_scene_contract_rejection) {
+    return;
+  }
+  g_resources.announced_native_scene_contract_rejection = true;
+  const auto rejected = std::ranges::find_if(
+      frame.draws, [](const Venue14DDrawSnapshot &draw) {
+        return !NativeSceneBackendContractReady(draw);
+      });
+  if (rejected == frame.draws.end()) {
+    REXLOG_INFO(
+        "Table Tennis 14D native scene: frame={} rejected invalid frame "
+        "snapshot before preparation",
+        frame.sequence);
+    return;
+  }
+  const size_t draw_index =
+      static_cast<size_t>(rejected - frame.draws.begin());
+  REXLOG_INFO(
+      "Table Tennis 14D native scene: frame={} draw={} ordinal={} backend "
+      "contract rejected valid={} depth={:08X}/{:08X} "
+      "mask={:08X}/{:08X} color={:08X}/{:08X} "
+      "blend={:08X}/[{:08X}|{:08X}] "
+      "raster={:08X}/{:08X}/{} attachments={} color0={} samples={} "
+      "sample_mask={:016X} restart={}",
+      frame.sequence, draw_index,
+      rejected->title != nullptr ? rejected->title->ordinal : 0,
+      rejected->valid(), rejected->backend.normalized_depth_control,
+      kNativeSceneDepthControl, rejected->backend.normalized_color_mask,
+      kNativeSceneColorMask, rejected->backend.color_control,
+      kNativeSceneColorControl, rejected->backend.blend_control_0,
+      kNativeSceneOpaqueBlendControl, kNativeSceneAlphaBlendControl,
+      rejected->backend.rasterizer_mode_control,
+      kNativeSceneRasterizerMode,
+      rejected->backend.rasterizer_mode_control_valid,
+      rejected->backend.color_attachment_count,
+      rejected->backend.color_attachment_formats[0],
+      rejected->backend.sample_count, rejected->backend.sample_mask,
+      rejected->backend.primitive_restart_enabled);
 }
 
 bool PreparedFrameMatches(
@@ -814,10 +885,57 @@ bool EnsurePreparedFrameData(
                              *texture_snapshot, static_cast<uint32_t>(slot))) {
         if (!g_resources.announced_sampler_rejection) {
           g_resources.announced_sampler_rejection = true;
+          xenos::xe_gpu_texture_fetch_t fetch{};
+          fetch.dword_0 = draw.title->material.texture_fetches[slot][0];
+          fetch.dword_1 = draw.title->material.texture_fetches[slot][1];
+          fetch.dword_2 = draw.title->material.texture_fetches[slot][2];
+          fetch.dword_3 = draw.title->material.texture_fetches[slot][3];
+          fetch.dword_4 = draw.title->material.texture_fetches[slot][4];
+          fetch.dword_5 = draw.title->material.texture_fetches[slot][5];
           REXLOG_ERROR(
               "Table Tennis 14D observer: rejected unproven sampler state "
-              "at draw={} slot={} (observer remains disabled for frame)",
-              index, slot);
+              "at draw={} ordinal={} slot={} "
+              "words={:08X}/{:08X}/{:08X}/{:08X}/{:08X}/{:08X} "
+              "type={} format={} dimension={} stacked={} "
+              "clamp={}/{}/{} filter={}/{}/{} aniso={} walk={}/{} "
+              "lod_bias={} grad={}/{} exp={} levels={}/{} border={}/{} "
+              "aniso_bias={} tri_clamp={} bc_w={} num={} swizzle={:03X} "
+              "descriptor_mip_max={} fetch_copy_match={} "
+              "(observer remains disabled for frame)",
+              index, draw.title->ordinal, slot, fetch.dword_0, fetch.dword_1,
+              fetch.dword_2, fetch.dword_3, fetch.dword_4, fetch.dword_5,
+              static_cast<uint32_t>(fetch.type),
+              static_cast<uint32_t>(fetch.format),
+              static_cast<uint32_t>(fetch.dimension),
+              static_cast<uint32_t>(fetch.stacked),
+              static_cast<uint32_t>(fetch.clamp_x),
+              static_cast<uint32_t>(fetch.clamp_y),
+              static_cast<uint32_t>(fetch.clamp_z),
+              static_cast<uint32_t>(fetch.mag_filter),
+              static_cast<uint32_t>(fetch.min_filter),
+              static_cast<uint32_t>(fetch.mip_filter),
+              static_cast<uint32_t>(fetch.aniso_filter),
+              static_cast<uint32_t>(fetch.mag_aniso_walk),
+              static_cast<uint32_t>(fetch.min_aniso_walk),
+              static_cast<uint32_t>(fetch.lod_bias),
+              static_cast<uint32_t>(fetch.grad_exp_adjust_h),
+              static_cast<uint32_t>(fetch.grad_exp_adjust_v),
+              static_cast<uint32_t>(fetch.exp_adjust),
+              static_cast<uint32_t>(fetch.mip_min_level),
+              static_cast<uint32_t>(fetch.mip_max_level),
+              static_cast<uint32_t>(fetch.border_color),
+              static_cast<uint32_t>(fetch.border_size),
+              static_cast<uint32_t>(fetch.aniso_bias),
+              static_cast<uint32_t>(fetch.tri_clamp),
+              static_cast<uint32_t>(fetch.force_bc_w_to_max),
+              static_cast<uint32_t>(fetch.num_format),
+              static_cast<uint32_t>(fetch.swizzle),
+              texture_snapshot != nullptr
+                  ? texture_snapshot->descriptor_mip_max_level
+                  : 0,
+              texture_snapshot != nullptr &&
+                  texture_snapshot->fetch_words ==
+                      draw.title->material.texture_fetches[slot]);
         }
         valid = false;
         break;
@@ -904,6 +1022,7 @@ bool PreparedNativeSceneFrameMatches(
          g_resources.device == context.device &&
          g_resources.layout != nullptr &&
          g_resources.native_scene_pipeline != nullptr &&
+         g_resources.native_scene_blended_pipeline != nullptr &&
          g_resources.native_scene_color_format == targets.color->format() &&
          g_resources.native_scene_depth_format == targets.depth->format() &&
          g_resources.native_scene_sample_count == targets.sample_count &&
@@ -960,12 +1079,30 @@ bool PrepareVenue14DNativeScene(
     const rex::graphics::NativeGuestOutputRenderContext &context,
     const NativeScenePassTargets &targets,
     const std::shared_ptr<const Venue14DFrameSnapshot> &frame) {
-  return ValidateNativeScenePassTargets(context, targets) ==
-             NativeScenePassTargetValidation::kValid &&
-         frame != nullptr && NativeSceneFrameReady(*frame) &&
-         EnsureNativeScenePipeline(context, targets) &&
-         EnsurePreparedFrameData(context, frame, 1.0f, 1.0f,
-                                 g_resources.native_scene);
+  if (ValidateNativeScenePassTargets(context, targets) !=
+          NativeScenePassTargetValidation::kValid ||
+      frame == nullptr) {
+    return false;
+  }
+  if (!NativeSceneFrameReady(*frame)) {
+    LogNativeSceneContractRejection(*frame);
+    return false;
+  }
+  if (!EnsureNativeScenePipeline(context, targets)) {
+    return false;
+  }
+  if (!EnsurePreparedFrameData(context, frame, 1.0f, 1.0f,
+                               g_resources.native_scene)) {
+    if (!g_resources.announced_native_scene_data_rejection) {
+      g_resources.announced_native_scene_data_rejection = true;
+      REXLOG_INFO(
+          "Table Tennis 14D native scene: frame={} immutable GPU payload "
+          "preparation failed after backend contract validation",
+          frame->sequence);
+    }
+    return false;
+  }
+  return true;
 }
 
 Venue14DNativeSceneRecordResult RecordPreparedVenue14DNativeSceneDraw(
@@ -1018,7 +1155,10 @@ Venue14DNativeSceneRecordResult RecordPreparedVenue14DNativeSceneDraw(
 
   nrhi::Cmd *const cmd = context.cmd;
   cmd->SetBindingLayout(g_resources.layout);
-  cmd->SetPipeline(g_resources.native_scene_pipeline);
+  cmd->SetPipeline(
+      draw.backend.blend_control_0 == kNativeSceneAlphaBlendControl
+          ? g_resources.native_scene_blended_pipeline
+          : g_resources.native_scene_pipeline);
   cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleStrip);
   cmd->SetConstantBuffer(0, prepared_frame.constant_buffer,
                          prepared->constant_offset);

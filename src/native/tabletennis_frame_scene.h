@@ -88,6 +88,11 @@ struct TableTennisFrameScene {
 // every frame, but never suppresses or replaces a guest draw.
 bool NativeFrameSceneCaptureEnabled();
 
+// Full diagnostic capture arms every discovered family, HUD and owner
+// observer. The private four-family transaction deliberately does not: it
+// captures only the components it consumes.
+bool NativeFrameSceneFullCaptureEnabled();
+
 // Called after every family publisher and the ordered catalog at title Swap.
 void NativeFrameSceneFrameEnd();
 

@@ -1,7 +1,6 @@
 #include "native/tabletennis_venue_526a_observer.h"
 
 #include "generated/default/tabletennis_init.h"
-#include "native/tabletennis_frame_scene.h"
 #include "native/tabletennis_guest_memory.h"
 #include "native/tabletennis_scene_draw_catalog.h"
 
@@ -467,8 +466,10 @@ void TrimFramesLocked() {
 } // namespace
 
 bool Venue526AObserverEnabled() {
-  return REXCVAR_GET(tabletennis_native_venue_526a_observer) ||
-         NativeFrameSceneCaptureEnabled();
+  // This family isn't consumed by the four-family private transaction yet.
+  // Keep it explicitly armed so the normal transaction path doesn't pay for
+  // an unrelated full title/backend capture.
+  return REXCVAR_GET(tabletennis_native_venue_526a_observer);
 }
 
 void ObserveVenue526ATitleDraw(

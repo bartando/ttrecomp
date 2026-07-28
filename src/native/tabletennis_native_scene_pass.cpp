@@ -7,6 +7,17 @@ namespace tabletennis::native {
 NativeScenePassTargetValidation ValidateNativeScenePassTargets(
     const rex::graphics::NativeGuestOutputRenderContext &context,
     const NativeScenePassTargets &targets) {
+  return ValidateNativeScenePassTargetsExact(
+      context, targets, rex::graphics::nrhi::Format::kR8G8B8A8_UNORM,
+      rex::graphics::nrhi::Format::kD32_FLOAT, 4);
+}
+
+NativeScenePassTargetValidation ValidateNativeScenePassTargetsExact(
+    const rex::graphics::NativeGuestOutputRenderContext &context,
+    const NativeScenePassTargets &targets,
+    rex::graphics::nrhi::Format expected_color_format,
+    rex::graphics::nrhi::Format expected_depth_format,
+    uint32_t expected_sample_count) {
   if (context.device == nullptr || context.cmd == nullptr ||
       context.guest_output == nullptr) {
     return NativeScenePassTargetValidation::kMissingContext;
@@ -26,14 +37,18 @@ NativeScenePassTargetValidation ValidateNativeScenePassTargets(
       targets.depth->height() != targets.height) {
     return NativeScenePassTargetValidation::kExtentMismatch;
   }
-  if (targets.color->format() != rex::graphics::nrhi::Format::kR8G8B8A8_UNORM) {
+  if (expected_color_format == rex::graphics::nrhi::Format::kUnknown ||
+      targets.color->format() != expected_color_format) {
     return NativeScenePassTargetValidation::kUnsupportedColorFormat;
   }
-  if (targets.depth->format() != rex::graphics::nrhi::Format::kD32_FLOAT) {
+  if (expected_depth_format == rex::graphics::nrhi::Format::kUnknown ||
+      targets.depth->format() != expected_depth_format) {
     return NativeScenePassTargetValidation::kUnsupportedDepthFormat;
   }
-  if (targets.sample_count != 4 || targets.color->sample_count() != 4 ||
-      targets.depth->sample_count() != 4) {
+  if (expected_sample_count == 0 ||
+      targets.sample_count != expected_sample_count ||
+      targets.color->sample_count() != expected_sample_count ||
+      targets.depth->sample_count() != expected_sample_count) {
     return NativeScenePassTargetValidation::kUnsupportedSampleCount;
   }
   if (context.guest_output->sample_count() != 1) {

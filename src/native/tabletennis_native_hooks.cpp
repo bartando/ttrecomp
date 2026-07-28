@@ -4,7 +4,10 @@
 #include "native/tabletennis_d47_player_observer.h"
 #include "native/tabletennis_draw_constants.h"
 #include "native/tabletennis_frame_scene.h"
+#include "native/tabletennis_hud_swf_backend_observer.h"
 #include "native/tabletennis_hud_swf_capture.h"
+#include "native/tabletennis_late_comp_first_slice.h"
+#include "native/tabletennis_late_phase_ledger.h"
 #include "native/tabletennis_main_coverage_ledger.h"
 #include "native/tabletennis_material_observer.h"
 #include "native/tabletennis_model_material_tokens.h"
@@ -13,21 +16,38 @@
 #include "native/tabletennis_net_bb903_observer.h"
 #include "native/tabletennis_player_2ac_observer.h"
 #include "native/tabletennis_player_2ac_renderer.h"
+#include "native/tabletennis_player_a406_observer.h"
+#include "native/tabletennis_player_bbb5_observer.h"
 #include "native/tabletennis_player_palette.h"
 #include "native/tabletennis_player_palette_write_observer.h"
 #include "native/tabletennis_player_skin_observer.h"
 #include "native/tabletennis_player_skin_snapshot.h"
+#include "native/tabletennis_ps328_tile_invariance.h"
 #include "native/tabletennis_scene_draw_catalog.h"
 #include "native/tabletennis_scene_owner_observer.h"
 #include "native/tabletennis_venue_14d_observer.h"
 #include "native/tabletennis_venue_526a_observer.h"
+#include "native/tabletennis_venue_9e_observer.h"
 #include "native/tabletennis_venue_e33_observer.h"
 #include "native/tabletennis_venue_full_family.h"
 #include "native/tabletennis_venue_snapshot.h"
 
 #include "generated/default/tabletennis_init.h"
 
+#include <atomic>
 #include <bit>
+
+#include <rex/logging.h>
+
+namespace {
+
+std::atomic<uint64_t> g_post_ps328_retirement_swap_count = 0;
+
+bool ShouldLogPostPs328RetirementSwap(uint64_t swap) {
+  return swap <= 3 || swap % 120 == 0;
+}
+
+} // namespace
 
 // pongPlayer's draw-bucket render callback. RTTI and Ghidra establish that
 // r3 is the embedded renderable at player+8; all character model submissions
@@ -276,7 +296,10 @@ extern "C" REX_FUNC(sub_82158C48) {
                                                    pass_descriptor);
   tabletennis::native::ObserveTableMaterialPass(base, runtime_state,
                                                 pass_descriptor);
+  tabletennis::native::BeginVenueE33ApplyPassProbe(base, runtime_state,
+                                                   pass_descriptor);
   __imp__sub_82158C48(ctx, base);
+  tabletennis::native::EndVenueE33ApplyPassProbe(base);
 }
 
 // Low-level gfx shader binders are the authoritative title-device
@@ -425,18 +448,35 @@ extern "C" REX_FUNC(sub_82280028) {
 // Title-side D3D Swap. Capture before the original call because VdSwap inside
 // it is what schedules the guest-output refresh and native-render callback.
 extern "C" REX_FUNC(sub_8235B750) {
+  const bool post_ps328_retirement =
+      tabletennis::native::Ps328TitleCaptureRetired();
+  const uint64_t post_ps328_retirement_swap =
+      post_ps328_retirement
+          ? g_post_ps328_retirement_swap_count.fetch_add(
+                1, std::memory_order_relaxed) +
+                1
+          : 0;
+  if (post_ps328_retirement &&
+      ShouldLogPostPs328RetirementSwap(post_ps328_retirement_swap)) {
+    REXLOG_INFO("Table Tennis post-PS328-retirement guest swap entered "
+                "swap={} observer_only=true",
+                post_ps328_retirement_swap);
+  }
   // Publish guest-owned venue buffers before CaptureFrameEnd decides whether
   // this swap needs the native observer post-process.
   tabletennis::native::VenueFullFamilyFrameEnd();
   tabletennis::native::VenueFamilyFrameEnd();
   tabletennis::native::Venue14DObserverFrameEnd();
   tabletennis::native::Venue526AObserverFrameEnd();
+  tabletennis::native::Venue9EObserverFrameEnd();
   tabletennis::native::VenueE33ObserverFrameEnd();
   tabletennis::native::NetBB903ObserverFrameEnd();
   tabletennis::native::Player2ACObserverFrameEnd();
   tabletennis::native::Player2ACCompositeObserverFrameEnd();
   tabletennis::native::Player6AEObserverFrameEnd();
   tabletennis::native::D47PlayerObserverFrameEnd();
+  tabletennis::native::PlayerA406ObserverFrameEnd();
+  tabletennis::native::PlayerBBB5ObserverFrameEnd();
   tabletennis::native::PlayerPaletteWriteObserverFrameEnd();
   tabletennis::native::PlayerPaletteFrameEnd();
   tabletennis::native::PlayerSkinSnapshotFrameEnd();
@@ -450,6 +490,15 @@ extern "C" REX_FUNC(sub_8235B750) {
   tabletennis::native::MainCoverageLedgerFrameEnd();
   tabletennis::native::SceneOwnerObserverFrameEnd();
   tabletennis::native::HudSwfCaptureFrameEnd();
+  tabletennis::native::HudSwfBackendObserverFrameEnd();
+  tabletennis::native::LatePhaseLedgerFrameEnd();
+  tabletennis::native::LateCompFirstSliceObserverFrameEnd();
   tabletennis::native::NativeFrameSceneFrameEnd();
   __imp__sub_8235B750(ctx, base);
+  if (post_ps328_retirement &&
+      ShouldLogPostPs328RetirementSwap(post_ps328_retirement_swap)) {
+    REXLOG_INFO("Table Tennis post-PS328-retirement guest swap returned "
+                "swap={} observer_only=true",
+                post_ps328_retirement_swap);
+  }
 }

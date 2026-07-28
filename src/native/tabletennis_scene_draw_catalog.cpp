@@ -8,11 +8,14 @@
 #include "native/tabletennis_guest_memory.h"
 #include "native/tabletennis_net_bb903_observer.h"
 #include "native/tabletennis_player_palette_write_observer.h"
+#include "native/tabletennis_player_a406_observer.h"
+#include "native/tabletennis_player_bbb5_observer.h"
 #include "native/tabletennis_player_2ac_observer.h"
 #include "native/tabletennis_player_skin_observer.h"
 #include "native/tabletennis_scene_owner_observer.h"
 #include "native/tabletennis_venue_14d_observer.h"
 #include "native/tabletennis_venue_526a_observer.h"
+#include "native/tabletennis_venue_9e_observer.h"
 #include "native/tabletennis_venue_e33_observer.h"
 #include "native/tabletennis_venue_full_family.h"
 #include "native/tabletennis_venue_snapshot.h"
@@ -105,10 +108,12 @@ bool CaptureEnabled() {
          PlayerPaletteWriteObserverEnabled() ||
          Player2ACObserverEnabled() ||
          PlayerSkinObserverEnabled() || Player6AEObserverEnabled() ||
-         D47PlayerObserverEnabled() ||
+         D47PlayerObserverEnabled() || PlayerA406ObserverEnabled() ||
+         PlayerBBB5ObserverEnabled() ||
          CrowdObserverEnabled() ||
          VenueFullFamilyObserverEnabled() || Venue14DObserverEnabled() ||
-         Venue526AObserverEnabled() || SceneOwnerObserverEnabled();
+         Venue526AObserverEnabled() || Venue9EObserverEnabled() ||
+         SceneOwnerObserverEnabled();
 }
 
 SceneCatalogScope *CurrentScope() {
@@ -291,6 +296,14 @@ SceneCatalogDrawState CaptureDrawState(uint8_t *guest_base,
       guest_base, device,
       kPixelConstantBankOffset + 46 * kConstantRowBytes,
       state.pixel_constant_46));
+  record(CaptureBeFloats(
+      guest_base, device,
+      kPixelConstantBankOffset + 254 * kConstantRowBytes,
+      state.pixel_constant_254));
+  record(CaptureBeFloats(
+      guest_base, device,
+      kPixelConstantBankOffset + 255 * kConstantRowBytes,
+      state.pixel_constant_255));
   state.valid =
       state.guest_read_failures == 0 && state.vertex_declaration != 0;
   return state;
@@ -946,8 +959,11 @@ void ObserveSceneDrawCatalogIndexedDraw(uint8_t *guest_base, uint32_t device,
   ObserveNetBB903TitleDraw(guest_base, draw);
   ObservePlayer6AECatalogDraw(guest_base, draw);
   ObserveD47PlayerCatalogDraw(guest_base, draw);
+  ObservePlayerA406TitleDraw(guest_base, draw);
+  ObservePlayerBBB5TitleDraw(guest_base, draw);
   ObserveVenue14DTitleDraw(guest_base, draw);
   ObserveVenue526ATitleDraw(guest_base, draw);
+  ObserveVenue9ETitleDraw(guest_base, draw);
   ObserveVenueE33TitleDraw(guest_base, draw);
   ObserveVenueFamilyDraw(guest_base, draw);
   ObservePlayerSkinDraw(guest_base, draw);

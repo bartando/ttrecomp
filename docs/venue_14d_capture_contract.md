@@ -26,11 +26,14 @@ sequence, not by address proximity:
 - pass `402DD218`, program `402E07B0`, VS `402DB350`, PS `402DC340`
 - pass `402F20A8`, program `402F5680`, VS `402EFCE0`, PS `402F0CD0`
 
-Ghidra's `rage_fx_ApplyPass` (`0x82158C48`) confirms these are authoritative
-draw-time fields: the pass descriptor owns the program pair at `+0x08`, and
-that pair owns the vertex/pixel shader references at `+0x48/+0x4C`. The title
-hook observes those pointers before the original function binds the programs
-and executes its device command lists.
+Ghidra's `rage_fx_ApplyPass` (`0x82158C48`) confirms the pass descriptor owns
+the program pair at `+0x08`, and that pair owns the vertex/pixel shader
+references at `+0x48/+0x4C`. These fields identify the title program that
+submitted each candidate. They are not always the final draw-time shader
+identity: live telemetry shows the same submitting program metadata feeding
+both translated vertex variants. The independent translated-backend event is
+therefore authoritative for the final shader variant. Publication requires
+that hash to select the captured 40- or 48-byte vertex layout exactly.
 
 For example, the first guest program emits
 `698,698,698,699,348,348,194,188,190,201,188`, exactly matching trace
@@ -66,8 +69,12 @@ has advanced, then requires:
 - exactly three equal-sized tile blocks for that one frame token;
 - the exact same ordered identities and backend state on all three tile
   replays, including raw `PA_SU_SC_MODE_CNTL` and its validity bit;
-- a one-to-one `{primitive, index count, physical index base}` join from the
-  first backend block to valid immutable title snapshots from the same frame;
+- raw and independently decoded MAIN target identity on every backend event:
+  color EDRAM base `0x400`, depth base `0`, pitch `1280`, mode `4`;
+- a one-to-one `{primitive, index count, physical index base, physical vertex
+  base, vertex bytes, vertex endian, shader-compatible vertex stride}` join
+  from the first backend block to valid immutable title snapshots from the
+  same frame, with a unique ordered-subsequence mapping;
 - zero drops, read/copy/texture failures, or sequence mismatches.
 
 Only then is an immutable `Venue14DFrameSnapshot` published. The master native
@@ -114,6 +121,16 @@ The immutable per-draw backend contract now also retains the raw rasterizer
 mode. The observer logs its live unique-value census; native culling remains
 disabled until that same-frame census proves a supported winding/cull tuple.
 
+Live transaction telemetry also proves two per-draw blend variants under the
+otherwise identical depth/color/raster contract:
+
+- `0x00010001`: opaque One/Zero;
+- `0x07060706`: source-alpha / one-minus-source-alpha for color and alpha.
+
+The native scene caches separate pipelines for those exact variants and
+selects one from each draw's immutable backend contract. Any other blend value
+rejects the complete private transaction.
+
 ## Sampler contract
 
 The five command-92 fetch constants and the other sampled 14D draws collapse
@@ -130,8 +147,12 @@ fetch constants are authoritative. RexGlue's guest texture cache deliberately
 normalizes an anisotropic fetch to linear min, mag, and mip filtering on both
 Vulkan and D3D12. The native observer mirrors that behavior with two immutable
 2x-anisotropic samplers: repeat for slots 0-3 and clamp-to-edge for slot 4.
-Every draw is rejected unless all sampler-affecting fetch fields, format,
-dimension, swizzle, numeric mode, and mip range match this proven contract.
+Every draw is rejected unless all sampler-affecting fetch fields, dimension,
+swizzle, numeric mode, and mip range match this proven contract. Compression
+format is resource state rather than sampler state: live slot-2 bindings use
+both DXT1 and DXT5. The renderer accepts only those two decoded formats and
+requires the immutable texture snapshot to contain the exact same six fetch
+words before selecting the matching host resource format.
 
 NRHI does not currently expose dynamic sampler objects or sampler descriptor
 tables. The two proven immutable states fit its static sampler model exactly,

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cmath>
 #include <cstring>
@@ -13,8 +14,13 @@
 #include <mutex>
 #include <utility>
 
+#include <rex/graphics/pipeline/texture/info.h>
+#include <rex/logging.h>
+
 namespace tabletennis::native {
 namespace {
+
+namespace xenos = rex::graphics::xenos;
 
 constexpr uint32_t kFetchBankOffset = 0x480;
 constexpr uint32_t kVertexConstantBankOffset = 0x780;
@@ -25,9 +31,14 @@ constexpr uint32_t kVertexStride = 36;
 constexpr uint32_t kPaletteRecordStride = 28;
 constexpr uint32_t kVertexEndian8In32 = 2;
 constexpr uint32_t kTriangleStripPrimitive = 6;
+constexpr uint64_t kPlayer6AEPixelShaderHash = 0x6AE43640A86B33D8ull;
+constexpr uint32_t kPlayer6AEFrameSharedTextureOwner = 0x6AE00000;
 constexpr uint32_t kTextureViewSwizzleShift = 1;
 constexpr uint32_t kTextureViewSwizzleMask = 0xFFF;
 constexpr uint32_t kMaterialTextureViewSwizzle = 0x688;
+constexpr uint32_t kMaskTextureViewSwizzle = 0x688;
+constexpr uint32_t kDepthTextureViewSwizzle = 0xB48;
+constexpr uint32_t kLookupTextureViewSwizzle = 0x60A;
 constexpr uint32_t kPhysicalAliasBase = 0xA0000000;
 constexpr uint32_t kPhysicalAddressMask = 0x1FFFFFFF;
 constexpr uint32_t kHighPhysicalHeapBase = 0xE0000000;
@@ -82,6 +93,7 @@ struct CachedPayload {
 };
 
 std::mutex g_cache_mutex;
+std::atomic<uint32_t> g_logged_sampler_failure_count = 0;
 std::vector<CachedPayload<VertexCacheKey, Player6AEVertexPayload>>
     g_vertex_cache;
 std::vector<CachedPayload<IndexCacheKey, Player6AEIndexPayload>>
@@ -237,6 +249,184 @@ uint32_t PhysicalAddressForVirtualAlias(uint32_t virtual_address) {
   return physical_address <= kPhysicalAddressMask
              ? static_cast<uint32_t>(physical_address)
              : 0;
+}
+
+xenos::xe_gpu_texture_fetch_t
+DecodeTextureFetch(const std::array<uint32_t, 6>& words) {
+  xenos::xe_gpu_texture_fetch_t fetch{};
+  fetch.dword_0 = words[0];
+  fetch.dword_1 = words[1];
+  fetch.dword_2 = words[2];
+  fetch.dword_3 = words[3];
+  fetch.dword_4 = words[4];
+  fetch.dword_5 = words[5];
+  return fetch;
+}
+
+bool ExactCommonSamplerState(const xenos::xe_gpu_texture_fetch_t& fetch) {
+  return fetch.type == xenos::FetchConstantType::kTexture &&
+         fetch.sign_x == xenos::TextureSign::kUnsigned &&
+         fetch.sign_y == xenos::TextureSign::kUnsigned &&
+         fetch.sign_z == xenos::TextureSign::kUnsigned &&
+         fetch.sign_w == xenos::TextureSign::kUnsigned &&
+         fetch._pad_0_19 == 0 && fetch.request_size == 0 &&
+         !fetch.stacked && fetch.nearest_clamp_policy == 0 &&
+         fetch.num_format == 0 && fetch.exp_adjust == 0 &&
+         fetch.arbitrary_filter == xenos::ArbitraryFilter::k2x4Sym &&
+         fetch.border_size == 0 &&
+         fetch.lod_bias == 0 && fetch.grad_exp_adjust_h == 0 &&
+         fetch.grad_exp_adjust_v == 0 &&
+         fetch.border_color == xenos::BorderColor::k_ABGR_Black &&
+         fetch.force_bc_w_to_max == 0 && fetch.tri_clamp == 3 &&
+         fetch.aniso_bias == 0 &&
+         fetch.dimension == xenos::DataDimension::k2DOrStacked &&
+         fetch.size_2d.stack_depth == 0 &&
+         fetch.mip_min_level == 0 && fetch.base_address != 0;
+}
+
+bool ExactAnisotropicSamplerState(
+    const xenos::xe_gpu_texture_fetch_t& fetch,
+    xenos::ClampMode clamp, xenos::TextureFilter mip_filter) {
+  return ExactCommonSamplerState(fetch) &&
+         fetch.clamp_x == clamp && fetch.clamp_y == clamp &&
+         fetch.clamp_z == clamp &&
+         fetch.mag_filter == xenos::TextureFilter::kLinear &&
+         fetch.min_filter == xenos::TextureFilter::kLinear &&
+         fetch.mip_filter == mip_filter &&
+         fetch.aniso_filter == xenos::AnisoFilter::kMax_2_1 &&
+         fetch.vol_mag_filter == 1 && fetch.vol_min_filter == 1 &&
+         fetch.mag_aniso_walk == 1 && fetch.min_aniso_walk == 1;
+}
+
+bool ExactPointSamplerState(const xenos::xe_gpu_texture_fetch_t& fetch) {
+  return ExactCommonSamplerState(fetch) &&
+         fetch.clamp_x == xenos::ClampMode::kClampToEdge &&
+         fetch.clamp_y == xenos::ClampMode::kClampToEdge &&
+         fetch.clamp_z == xenos::ClampMode::kClampToEdge &&
+         fetch.mag_filter == xenos::TextureFilter::kPoint &&
+         fetch.min_filter == xenos::TextureFilter::kPoint &&
+         fetch.mip_filter == xenos::TextureFilter::kBaseMap &&
+         fetch.aniso_filter == xenos::AnisoFilter::kDisabled &&
+         fetch.vol_mag_filter == 0 && fetch.vol_min_filter == 0 &&
+         fetch.mag_aniso_walk == 0 && fetch.min_aniso_walk == 0 &&
+         fetch.mip_max_level == 0 && !fetch.packed_mips &&
+         fetch.mip_address == 0;
+}
+
+bool ExactPlayer6AESamplerState(
+    uint32_t fetch_slot, const std::array<uint32_t, 6>& words) {
+  const xenos::xe_gpu_texture_fetch_t fetch = DecodeTextureFetch(words);
+  const xenos::TextureFormat format =
+      rex::graphics::GetBaseFormat(fetch.format);
+  if (!fetch.tiled) {
+    return false;
+  }
+  switch (fetch_slot) {
+    case 0:
+      return format == xenos::TextureFormat::k_DXT1 &&
+             fetch.endianness == xenos::Endian::k8in16 &&
+             fetch.swizzle == kMaterialTextureViewSwizzle &&
+             ExactAnisotropicSamplerState(
+                 fetch, xenos::ClampMode::kRepeat,
+                 xenos::TextureFilter::kLinear) &&
+             fetch.mip_max_level != 0 && fetch.packed_mips &&
+             fetch.mip_address != 0;
+    case 1:
+      return format == xenos::TextureFormat::k_DXT4_5 &&
+             fetch.endianness == xenos::Endian::k8in16 &&
+             fetch.swizzle == kMaterialTextureViewSwizzle &&
+             ExactAnisotropicSamplerState(
+                 fetch, xenos::ClampMode::kRepeat,
+                 xenos::TextureFilter::kPoint) &&
+             fetch.mip_max_level != 0 && fetch.packed_mips &&
+             fetch.mip_address != 0;
+    case 2:
+      return (format == xenos::TextureFormat::k_DXT1 ||
+              format == xenos::TextureFormat::k_DXT4_5) &&
+             fetch.endianness == xenos::Endian::k8in16 &&
+             fetch.swizzle == kMaterialTextureViewSwizzle &&
+             ExactAnisotropicSamplerState(
+                 fetch, xenos::ClampMode::kRepeat,
+                 xenos::TextureFilter::kPoint) &&
+             fetch.mip_max_level != 0 && fetch.packed_mips &&
+             fetch.mip_address != 0;
+    case 3:
+      return format == xenos::TextureFormat::k_24_8 &&
+             fetch.endianness == xenos::Endian::k8in32 &&
+             fetch.swizzle == kDepthTextureViewSwizzle &&
+             ExactPointSamplerState(fetch) &&
+             ((fetch.size_2d.width + 1 == 640 &&
+               fetch.size_2d.height + 1 == 480) ||
+              (fetch.size_2d.width + 1 == 1120 &&
+               fetch.size_2d.height + 1 == 704));
+    case 4:
+      return fetch.endianness == xenos::Endian::k8in32 &&
+             ExactPointSamplerState(fetch) &&
+             ((format == xenos::TextureFormat::k_8_8_8_8 &&
+               fetch.swizzle == kLookupTextureViewSwizzle &&
+               fetch.size_2d.width + 1 == 32 &&
+               fetch.size_2d.height + 1 == 32) ||
+              (format == xenos::TextureFormat::k_24_8 &&
+               fetch.swizzle == kDepthTextureViewSwizzle &&
+               fetch.size_2d.width + 1 == 1120 &&
+               fetch.size_2d.height + 1 == 704));
+    case 5:
+      return format == xenos::TextureFormat::k_DXT1 &&
+             fetch.endianness == xenos::Endian::k8in16 &&
+             fetch.swizzle == kMaskTextureViewSwizzle &&
+             ExactAnisotropicSamplerState(
+                 fetch, xenos::ClampMode::kClampToEdge,
+                 xenos::TextureFilter::kPoint) &&
+             fetch.size_2d.width + 1 == 256 &&
+             fetch.size_2d.height + 1 == 256 &&
+             fetch.mip_max_level == 0 && !fetch.packed_mips &&
+             fetch.mip_address == 0;
+    default:
+      return false;
+  }
+}
+
+bool IsImmutableFrameSharedTexture(
+    uint32_t fetch_slot, const std::array<uint32_t, 6>& words) {
+  if (!ExactPlayer6AESamplerState(fetch_slot, words)) {
+    return false;
+  }
+  if (fetch_slot == 5) {
+    // The mask is an immutable material input shared by all 6AE draws that
+    // bind the same complete fetch descriptor.
+    return true;
+  }
+  if (fetch_slot != 4) {
+    return false;
+  }
+  const xenos::xe_gpu_texture_fetch_t fetch = DecodeTextureFetch(words);
+  return rex::graphics::GetBaseFormat(fetch.format) ==
+             xenos::TextureFormat::k_8_8_8_8 &&
+         fetch.swizzle == kLookupTextureViewSwizzle &&
+         fetch.size_2d.width + 1 == 32 &&
+         fetch.size_2d.height + 1 == 32;
+}
+
+uint32_t SharedTextureOwner(
+    uint32_t pass_descriptor, uint32_t fetch_slot,
+    const std::array<uint32_t, 6>& words) {
+  // Canonical ownership is intentionally frame-bounded by the synthetic
+  // handle below. Dynamic depth (slot 3 and the slot-4 depth variant) keeps
+  // pass ownership and therefore cannot reuse an earlier draw's pixels.
+  return IsImmutableFrameSharedTexture(fetch_slot, words)
+             ? kPlayer6AEFrameSharedTextureOwner | fetch_slot
+             : pass_descriptor;
+}
+
+uint32_t SharedTextureFrameHandle(uint64_t frame_sequence,
+                                  uint32_t fetch_slot) {
+  uint32_t folded =
+      static_cast<uint32_t>(frame_sequence) ^
+      static_cast<uint32_t>(frame_sequence >> 32);
+  // Zero is reserved by several title-side handles. Retain the fetch slot in
+  // the low bits so all three shared resources remain distinct within a frame.
+  folded = (folded << 3) | (fetch_slot & 7u);
+  return folded != 0 ? folded : (0x80000000u | fetch_slot);
 }
 
 Player6AEVertexFetch CaptureVertexFetch(uint8_t* guest_base,
@@ -508,18 +698,18 @@ bool CaptureMaterial(uint8_t* guest_base,
                      uint32_t& guest_read_failures,
                      uint32_t& texture_capture_failures) {
   std::array<uint32_t,
-             Player6AEMaterialSnapshot::kTextureBindingCount * 6>
+             Player6AEMaterialSnapshot::kTextureFetchSlotCount * 6>
       texture_words{};
   if (!CaptureBeWords(guest_base, draw.device, kFetchBankOffset,
                       texture_words)) {
     ++guest_read_failures;
   } else {
-    for (size_t binding = 0; binding < material.texture_fetches.size();
-         ++binding) {
-      std::copy_n(texture_words.begin() + binding * 6, 6,
-                  material.texture_fetches[binding].begin());
-      material.texture_view_swizzles[binding] =
-          (material.texture_fetches[binding][3] >>
+    for (size_t fetch_slot = 0;
+         fetch_slot < material.texture_fetches.size(); ++fetch_slot) {
+      std::copy_n(texture_words.begin() + fetch_slot * 6, 6,
+                  material.texture_fetches[fetch_slot].begin());
+      material.texture_view_swizzles[fetch_slot] =
+          (material.texture_fetches[fetch_slot][3] >>
            kTextureViewSwizzleShift) &
           kTextureViewSwizzleMask;
     }
@@ -556,30 +746,108 @@ bool CaptureMaterial(uint8_t* guest_base,
       material.texture_fetches, [](const auto& fetch) {
         return (fetch[0] & 0x3u) == 2 && fetch[1] != 0;
       });
+  for (uint32_t fetch_slot = 0;
+       fetch_slot < material.sampler_contracts_valid.size(); ++fetch_slot) {
+    material.sampler_contracts_valid[fetch_slot] =
+        ExactPlayer6AESamplerState(
+            fetch_slot, material.texture_fetches[fetch_slot]);
+    if (!material.sampler_contracts_valid[fetch_slot] &&
+        draw.pass.pixel_shader_hash == kPlayer6AEPixelShaderHash) {
+      const uint32_t logged = g_logged_sampler_failure_count.fetch_add(1);
+      if (logged < 32) {
+        const auto& words = material.texture_fetches[fetch_slot];
+        const xenos::xe_gpu_texture_fetch_t fetch =
+            DecodeTextureFetch(words);
+        REXLOG_INFO(
+            "Table Tennis 6AE sampler rejection: frame={} ordinal={} "
+            "fetch_slot={} words={:08X}/{:08X}/{:08X}/{:08X}/{:08X}/{:08X} "
+            "format={} endian={} tiled={} swizzle={:03X} "
+            "clamp={}/{}/{} filter={}/{}/{} aniso={} mip_max={} "
+            "packed_mips={} mip_address={:05X} size={}x{} "
+            "vol_filter={}/{} walk={}/{} arbitrary={} tri_clamp={} "
+            "lod_bias={} grad={}/{} exp={} num={} border={}/{} "
+            "observer_only=true",
+            draw.frame_sequence, draw.ordinal, fetch_slot, words[0], words[1],
+            words[2], words[3], words[4], words[5],
+            static_cast<uint32_t>(
+                rex::graphics::GetBaseFormat(fetch.format)),
+            static_cast<uint32_t>(fetch.endianness), fetch.tiled,
+            fetch.swizzle, static_cast<uint32_t>(fetch.clamp_x),
+            static_cast<uint32_t>(fetch.clamp_y),
+            static_cast<uint32_t>(fetch.clamp_z),
+            static_cast<uint32_t>(fetch.mag_filter),
+            static_cast<uint32_t>(fetch.min_filter),
+            static_cast<uint32_t>(fetch.mip_filter),
+            static_cast<uint32_t>(fetch.aniso_filter),
+            fetch.mip_max_level, fetch.packed_mips, fetch.mip_address,
+            fetch.size_2d.width + 1, fetch.size_2d.height + 1,
+            fetch.vol_mag_filter, fetch.vol_min_filter,
+            fetch.mag_aniso_walk, fetch.min_aniso_walk,
+            static_cast<uint32_t>(fetch.arbitrary_filter), fetch.tri_clamp,
+            fetch.lod_bias, fetch.grad_exp_adjust_h,
+            fetch.grad_exp_adjust_v, fetch.exp_adjust, fetch.num_format,
+            fetch.border_size, static_cast<uint32_t>(fetch.border_color));
+      }
+    }
+  }
+  material.sampler_contract_valid =
+      std::ranges::all_of(material.sampler_contracts_valid,
+                          [](bool valid) { return valid; });
+
   for (size_t material_slot = 0;
        material_slot < material.material_textures.size(); ++material_slot) {
-    const uint32_t binding =
-        Player6AEMaterialSnapshot::kMaterialTextureBindings[material_slot];
+    const uint32_t fetch_slot =
+        Player6AEMaterialSnapshot::kMaterialTextureFetchSlots[material_slot];
     material.material_textures[material_slot] = CaptureTextureSnapshot(
-        guest_base, draw.pass.pass_descriptor, binding,
-        material.texture_fetches[binding]);
+        guest_base, draw.pass.pass_descriptor, fetch_slot,
+        material.texture_fetches[fetch_slot],
+        TextureMipCapture::kFullFetchRange);
     texture_capture_failures +=
         material.material_textures[material_slot] == nullptr;
+  }
+  for (size_t shared_slot = 0;
+       shared_slot < material.shared_textures.size(); ++shared_slot) {
+    const uint32_t fetch_slot =
+        Player6AEMaterialSnapshot::kSharedTextureFetchSlots[shared_slot];
+    material.shared_textures[shared_slot] = CaptureTextureSnapshot(
+        guest_base,
+        SharedTextureOwner(draw.pass.pass_descriptor, fetch_slot,
+                           material.texture_fetches[fetch_slot]),
+        SharedTextureFrameHandle(draw.frame_sequence, fetch_slot),
+        material.texture_fetches[fetch_slot],
+        TextureMipCapture::kFullFetchRange);
+    texture_capture_failures +=
+        material.shared_textures[shared_slot] == nullptr;
   }
 
   bool material_textures_valid = true;
   for (size_t material_slot = 0;
        material_slot < material.material_textures.size(); ++material_slot) {
-    const uint32_t binding =
-        Player6AEMaterialSnapshot::kMaterialTextureBindings[material_slot];
+    const uint32_t fetch_slot =
+        Player6AEMaterialSnapshot::kMaterialTextureFetchSlots[material_slot];
     const auto& texture = material.material_textures[material_slot];
     material_textures_valid &=
         texture != nullptr && texture->valid() &&
-        texture->fetch_words == material.texture_fetches[binding] &&
+        texture->full_mip_chain() &&
+        texture->fetch_words == material.texture_fetches[fetch_slot] &&
         texture->fetch_swizzle == kMaterialTextureViewSwizzle &&
-        material.texture_view_swizzles[binding] ==
+        material.texture_view_swizzles[fetch_slot] ==
             kMaterialTextureViewSwizzle;
   }
+  bool shared_textures_valid = draw.frame_sequence != 0;
+  for (size_t shared_slot = 0;
+       shared_slot < material.shared_textures.size(); ++shared_slot) {
+    const uint32_t fetch_slot =
+        Player6AEMaterialSnapshot::kSharedTextureFetchSlots[shared_slot];
+    const auto& texture = material.shared_textures[shared_slot];
+    shared_textures_valid &=
+        texture != nullptr && texture->valid() &&
+        texture->full_mip_chain() &&
+        texture->fetch_words == material.texture_fetches[fetch_slot] &&
+        texture->fetch_swizzle ==
+            material.texture_view_swizzles[fetch_slot];
+  }
+  material.shared_resource_ownership_valid = shared_textures_valid;
 
   std::array<float, 4> pixel_constant_254{};
   std::array<float, 4> pixel_constant_255{};
@@ -594,7 +862,8 @@ bool CaptureMaterial(uint8_t* guest_base,
       ApproximatelyEqual(pixel_constant_255, kExpectedPixelConstant255);
   material.valid =
       guest_read_failures == 0 && fetches_valid &&
-      material_textures_valid && material.literal_contract_valid &&
+      material_textures_valid && material.shared_resource_ownership_valid &&
+      material.sampler_contract_valid && material.literal_contract_valid &&
       AllFinite(material.vertex_constants_12_15) &&
       AllFinite(material.vertex_constant_19) &&
       AllFinite(material.vertex_constants_29_36) &&
@@ -659,6 +928,9 @@ Player6AETitleCapture CapturePlayer6AETitleDraw(
       .primitive_type = draw.primitive_type,
       .submitted_index_count = draw.submitted_index_count,
       .guest_index_base = capture.index_physical_address,
+      .guest_vertex_base = vertices.physical_address,
+      .guest_vertex_bytes = vertices.size,
+      .guest_vertex_endian = vertices.endian,
   };
 
   auto snapshot = std::make_shared<Player6AEDrawSnapshot>();
@@ -687,11 +959,29 @@ Player6AETitleCapture CapturePlayer6AETitleDraw(
   CaptureMaterial(guest_base, draw, snapshot->material,
                   capture.guest_read_failures,
                   capture.texture_capture_failures);
+  capture.sampler_contract_failures = static_cast<uint32_t>(
+      std::ranges::count(snapshot->material.sampler_contracts_valid, false));
+  for (uint32_t fetch_slot = 0;
+       fetch_slot < snapshot->material.sampler_contracts_valid.size();
+       ++fetch_slot) {
+    if (!snapshot->material.sampler_contracts_valid[fetch_slot]) {
+      capture.sampler_contract_failure_mask |= 1u << fetch_slot;
+    }
+  }
+  capture.shared_resource_capture_failures = static_cast<uint32_t>(
+      std::ranges::count_if(
+          snapshot->material.shared_textures,
+          [](const auto& texture) {
+            return texture == nullptr || !texture->valid() ||
+                   !texture->full_mip_chain();
+          }));
 
   snapshot->valid =
       capture.guest_read_failures == 0 &&
       capture.payload_copy_failures == 0 &&
       capture.texture_capture_failures == 0 &&
+      capture.sampler_contract_failures == 0 &&
+      capture.shared_resource_capture_failures == 0 &&
       snapshot->vertices != nullptr && snapshot->vertices->valid() &&
       snapshot->indices != nullptr && snapshot->indices->valid() &&
       snapshot->palette != nullptr && snapshot->palette->valid() &&

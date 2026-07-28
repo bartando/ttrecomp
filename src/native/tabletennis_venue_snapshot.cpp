@@ -153,6 +153,8 @@ VenueMaterialSnapshot CaptureMaterial(
     uint8_t* guest_base, const SceneCatalogDrawOccurrence& draw) {
   VenueMaterialSnapshot material;
   material.vertex_declaration = draw.state.vertex_declaration;
+  material.vertex_declaration_identity =
+      ProbeVertexDeclaration(guest_base, material.vertex_declaration);
   material.texture_fetches = draw.state.texture_fetches;
   material.vertex_constants_0_6 =
       draw.state.vertex_constants_0_6;
@@ -190,6 +192,7 @@ VenueMaterialSnapshot CaptureMaterial(
                   material.pixel_constant_46.end(),
                   [](float value) { return std::isfinite(value); });
   material.valid = material.vertex_declaration != 0 &&
+                   material.vertex_declaration_identity.valid &&
                    texture_fetches_valid && constants_finite &&
                    material.wvp_verified &&
                    std::all_of(
@@ -235,6 +238,8 @@ std::shared_ptr<const VenueMeshSnapshot> CaptureMesh(
   }
 
   auto snapshot = std::make_shared<VenueMeshSnapshot>();
+  snapshot->raw_vertex_bytes = vertex_bytes;
+  snapshot->raw_index_bytes = index_bytes;
   snapshot->positions.resize(vertex_count);
   snapshot->texcoords0.resize(vertex_count);
   snapshot->texcoords1.resize(vertex_count);
@@ -278,6 +283,8 @@ std::shared_ptr<const VenueMeshSnapshot> CaptureMesh(
         color[0] / 255.0f,
     };
   }
+  uint32_t minimum_index = std::numeric_limits<uint32_t>::max();
+  uint32_t maximum_index = 0;
   for (uint32_t index = 0; index < draw.submitted_index_count; ++index) {
     const uint16_t decoded =
         LoadBeU16(index_bytes.data() + static_cast<size_t>(index) * 2);
@@ -285,13 +292,19 @@ std::shared_ptr<const VenueMeshSnapshot> CaptureMesh(
       return nullptr;
     }
     snapshot->indices[index] = decoded;
+    minimum_index = std::min<uint32_t>(minimum_index, decoded);
+    maximum_index = std::max<uint32_t>(maximum_index, decoded);
   }
 
   snapshot->primitive_type = draw.primitive_type;
   snapshot->source_vertex_alias = mesh.vertex_buffer_alias;
   snapshot->source_index_alias = mesh.index_buffer_alias;
+  snapshot->source_index_physical_address =
+      GuestPhysicalAddressForVirtualAlias(mesh.index_buffer_alias);
   snapshot->source_vertex_stride = mesh.vertex_stride;
   snapshot->submitted_index_count = draw.submitted_index_count;
+  snapshot->minimum_index = minimum_index;
+  snapshot->maximum_index = maximum_index;
   snapshot->vertex_fingerprint = Fingerprint(vertex_bytes);
   snapshot->index_fingerprint = Fingerprint(index_bytes);
   return snapshot;

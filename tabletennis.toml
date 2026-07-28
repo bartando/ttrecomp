@@ -46,6 +46,9 @@ keybind_start = "Return"
 
 fullscreen = false
 
+# Keep normal local runs silent while preserving the emulated audio clock.
+audio_mute = true
+
 # --- Frame pacing -----------------------------------------------------------
 # With vsync off and no present limiter the guest vblank free-runs, so the game
 # advances its own clock faster than the console did - which is why the intro

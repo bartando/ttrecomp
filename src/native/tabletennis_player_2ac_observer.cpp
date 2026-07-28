@@ -3,6 +3,7 @@
 #include "generated/default/tabletennis_init.h"
 #include "native/tabletennis_frame_scene.h"
 #include "native/tabletennis_guest_memory.h"
+#include "native/tabletennis_late_phase_ledger.h"
 #include "native/tabletennis_player_2ac_renderer.h"
 #include "native/tabletennis_scene_draw_catalog.h"
 
@@ -921,7 +922,7 @@ bool Player2ACFrameSnapshot::valid() const {
 bool Player2ACObserverEnabled() {
   return REXCVAR_GET(tabletennis_native_player_2ac_observer) ||
          NativeFrameSceneCaptureEnabled() ||
-         Player2ACCompositeObserverEnabled();
+         Player2ACCompositeObserverEnabled() || LatePhaseLedgerEnabled();
 }
 
 void ObservePlayer2ACTitleDraw(uint8_t *guest_base,

@@ -535,6 +535,8 @@ CrowdDrawSnapshot CaptureCrowdDrawSnapshot(
     snapshot.shader = draw.scope.shader;
     snapshot.model = draw.scope.model;
     snapshot.geometry_index = draw.scope.geometry_index;
+  }
+  if (draw.pass.valid) {
     snapshot.pass_descriptor = draw.pass.pass_descriptor;
     snapshot.program_pair = draw.pass.program_pair;
     snapshot.vertex_shader = draw.pass.vertex_shader;

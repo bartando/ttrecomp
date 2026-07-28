@@ -55,6 +55,7 @@ struct IndexCacheKey {
   uint32_t physical_address = 0;
   uint32_t source_virtual_alias = 0;
   uint32_t submitted_index_count = 0;
+  uint32_t vertex_count = 0;
 
   bool operator==(const IndexCacheKey &) const = default;
 };
@@ -62,6 +63,7 @@ struct IndexCacheKey {
 template <typename Key, typename Payload> struct CachedPayload {
   Key key{};
   std::shared_ptr<const Payload> payload;
+  uint64_t last_validated_frame = 0;
 };
 
 std::mutex g_cache_mutex;
@@ -265,6 +267,15 @@ CaptureVertices(uint8_t *guest_base, const SceneCatalogDrawOccurrence &draw) {
       .byte_count = mesh.vertex_buffer_bytes,
       .source_virtual_alias = mesh.vertex_buffer_alias,
   };
+  {
+    std::lock_guard lock(g_cache_mutex);
+    const auto cached = std::ranges::find_if(
+        g_vertex_cache, [&](const auto &entry) { return entry.key == key; });
+    if (draw.frame_sequence != 0 && cached != g_vertex_cache.end() &&
+        cached->last_validated_frame == draw.frame_sequence) {
+      return cached->payload;
+    }
+  }
 
   auto payload = std::make_shared<VenueE33VertexPayload>();
   payload->source_virtual_alias = mesh.vertex_buffer_alias;
@@ -286,6 +297,9 @@ CaptureVertices(uint8_t *guest_base, const SceneCatalogDrawOccurrence &draw) {
   if (const auto cached = FindCached(g_vertex_cache, key)) {
     if (cached->payload_fingerprint == payload->payload_fingerprint &&
         cached->raw_bytes == payload->raw_bytes) {
+      const auto found = std::ranges::find_if(
+          g_vertex_cache, [&](const auto &entry) { return entry.key == key; });
+      found->last_validated_frame = draw.frame_sequence;
       return cached;
     }
     const auto found = std::ranges::find_if(
@@ -299,6 +313,7 @@ CaptureVertices(uint8_t *guest_base, const SceneCatalogDrawOccurrence &draw) {
     }
     g_vertex_cache_bytes = retained_bytes + payload->raw_bytes.size();
     found->payload = payload;
+    found->last_validated_frame = draw.frame_sequence;
     return payload;
   }
   if (g_vertex_cache.size() >= kMaximumCachedVertices ||
@@ -308,7 +323,7 @@ CaptureVertices(uint8_t *guest_base, const SceneCatalogDrawOccurrence &draw) {
     return nullptr;
   }
   g_vertex_cache_bytes += payload->raw_bytes.size();
-  g_vertex_cache.push_back({key, payload});
+  g_vertex_cache.push_back({key, payload, draw.frame_sequence});
   return payload;
 }
 
@@ -332,7 +347,18 @@ CaptureIndices(uint8_t *guest_base, const SceneCatalogDrawOccurrence &draw,
       .physical_address = physical_address,
       .source_virtual_alias = draw.mesh.index_buffer_alias,
       .submitted_index_count = draw.submitted_index_count,
+      .vertex_count = vertex_count,
   };
+  {
+    std::lock_guard lock(g_cache_mutex);
+    const auto cached = std::ranges::find_if(
+        g_index_cache, [&](const auto &entry) { return entry.key == key; });
+    if (draw.frame_sequence != 0 && cached != g_index_cache.end() &&
+        cached->last_validated_frame == draw.frame_sequence) {
+      result.payload = cached->payload;
+      return result;
+    }
+  }
 
   auto payload = std::make_shared<VenueE33IndexPayload>();
   payload->source_virtual_alias = draw.mesh.index_buffer_alias;
@@ -376,6 +402,9 @@ CaptureIndices(uint8_t *guest_base, const SceneCatalogDrawOccurrence &draw,
   if (const auto cached = FindCached(g_index_cache, key)) {
     if (cached->payload_fingerprint == payload->payload_fingerprint &&
         cached->raw_bytes == payload->raw_bytes) {
+      const auto found = std::ranges::find_if(
+          g_index_cache, [&](const auto &entry) { return entry.key == key; });
+      found->last_validated_frame = draw.frame_sequence;
       result.payload = cached;
       return result;
     }
@@ -391,6 +420,7 @@ CaptureIndices(uint8_t *guest_base, const SceneCatalogDrawOccurrence &draw,
     }
     g_index_cache_bytes = retained_bytes + payload->raw_bytes.size();
     found->payload = payload;
+    found->last_validated_frame = draw.frame_sequence;
     result.payload = payload;
     return result;
   }
@@ -402,7 +432,7 @@ CaptureIndices(uint8_t *guest_base, const SceneCatalogDrawOccurrence &draw,
     return result;
   }
   g_index_cache_bytes += payload->raw_bytes.size();
-  g_index_cache.push_back({key, payload});
+  g_index_cache.push_back({key, payload, draw.frame_sequence});
   result.payload = std::move(payload);
   return result;
 }
@@ -646,6 +676,10 @@ ClassifyVenueE33TitleCandidate(uint8_t *guest_base,
       .primitive_type = draw.primitive_type,
       .submitted_index_count = draw.submitted_index_count,
       .guest_index_base = index_base,
+      .guest_vertex_base =
+          PhysicalAddressForVirtualAlias(draw.mesh.vertex_buffer_alias),
+      .guest_vertex_bytes = draw.mesh.vertex_buffer_bytes,
+      .guest_vertex_endian = draw.mesh.vertex_endian,
   };
   candidate.program = {
       .pass_descriptor = draw.pass.pass_descriptor,

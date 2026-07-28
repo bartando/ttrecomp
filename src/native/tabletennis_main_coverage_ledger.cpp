@@ -1,19 +1,28 @@
 #include "native/tabletennis_main_coverage_ledger.h"
 
+#include "generated/default/tabletennis_init.h"
 #include "native/tabletennis_6ae_player_observer.h"
 #include "native/tabletennis_crowd_observer.h"
 #include "native/tabletennis_d47_player_observer.h"
+#include "native/tabletennis_guest_memory.h"
 #include "native/tabletennis_net_bb903_observer.h"
+#include "native/tabletennis_player_a406_observer.h"
+#include "native/tabletennis_player_bbb5_observer.h"
 #include "native/tabletennis_player_skin_snapshot.h"
+#include "native/tabletennis_ps328_tile_invariance.h"
 #include "native/tabletennis_scene_draw_catalog.h"
 #include "native/tabletennis_venue_14d_observer.h"
+#include "native/tabletennis_venue_9e_observer.h"
 #include "native/tabletennis_venue_e33_observer.h"
 #include "native/tabletennis_venue_full_family.h"
 
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <deque>
 #include <limits>
 #include <memory>
@@ -27,6 +36,7 @@
 #include <rex/cvar.h>
 #include <rex/graphics/native_guest_renderer.h>
 #include <rex/logging.h>
+#include <rex/system/kernel_state.h>
 
 REXCVAR_DEFINE_BOOL(
     tabletennis_native_main_coverage_ledger, false, "Table Tennis",
@@ -46,18 +56,26 @@ namespace {
 
 namespace nrhi = rex::graphics::nrhi;
 
-constexpr uint32_t kMainRenderPassKey = 0x0000000E;
+constexpr uint32_t kMainColorEdramBase = 0x00000400;
+constexpr uint32_t kMainDepthEdramBase = 0;
 constexpr uint32_t kMainSurfacePitch = 1280;
+constexpr uint32_t kColorDepthEdramMode = 4;
 constexpr uint32_t kRequiredSampleCount = 4;
 constexpr uint32_t kPhysicalAddressMask = 0x1FFFFFFF;
-constexpr uint32_t kHighPhysicalHeapBase = 0xE0000000;
-constexpr uint32_t kHighPhysicalHeapHostPageOffset = 0x1000;
 constexpr size_t kMaximumRetainedFrames = 8;
 constexpr size_t kMaximumBackendEventsPerFrame = 4096;
 constexpr uint64_t kCrowdVertexShaderHash = 0xBD4B1DF972B828B7ull;
 constexpr uint64_t kCrowdPixelShaderHash = 0xC6CEFDA3753CF2BAull;
 constexpr uint64_t kPlayerCa9VertexShaderHash = 0xCA9BBF96B0928616ull;
 constexpr uint64_t kPlayerCa9PixelShaderHash = 0x77AF85E1AF823D02ull;
+constexpr uint64_t kMainPrefixVertexShaderHash = 0x0A6D1DD7767FDF27ull;
+constexpr uint64_t kMainPrefixPixelShaderHash = 0x2E372EA28CC404B7ull;
+constexpr uint32_t kRectangleListPrimitive = 8;
+constexpr uint32_t kVertexEndian8In32 = 2;
+constexpr uint32_t kObservedRectangleNanBits = 0xFFFFFFFFu;
+constexpr uint32_t kPhysicalAliasBase = 0xA0000000;
+constexpr uint64_t kFnvOffsetBasis = 1469598103934665603ull;
+constexpr uint64_t kFnvPrime = 1099511628211ull;
 
 struct BackendEvent {
   uint64_t sequence = 0;
@@ -65,6 +83,9 @@ struct BackendEvent {
   uint64_t vertex_shader_hash = 0;
   uint64_t pixel_shader_hash = 0;
   MainCoverageBackendContract contract{};
+  MainCoverageBackendOnlyClassification classification =
+      MainCoverageBackendOnlyClassification::kUnclassified;
+  MainCoverageVertexColorRectangleProof vertex_color_rectangle{};
 };
 
 struct TitleToken {
@@ -86,7 +107,7 @@ struct FamilyAssignment {
 };
 
 constexpr size_t kAssignmentFamilyCount =
-    static_cast<size_t>(MainCoverageAssignmentFamily::kNetBB903) + 1;
+    static_cast<size_t>(MainCoverageAssignmentFamily::kPlayerBBB5) + 1;
 
 struct FrameLedger {
   uint64_t sequence = 0;
@@ -121,35 +142,184 @@ bool g_logged_first_valid_frame = false;
 MainCoverageRejectReason g_last_logged_reject_reason =
     MainCoverageRejectReason::kNone;
 
-uint32_t PhysicalAddressForVirtualAlias(uint32_t virtual_address) {
-  if (virtual_address < kHighPhysicalHeapBase) {
-    return 0;
-  }
-  const uint64_t physical_address =
-      static_cast<uint64_t>(virtual_address - kHighPhysicalHeapBase) +
-      kHighPhysicalHeapHostPageOffset;
-  return physical_address <= kPhysicalAddressMask
-             ? static_cast<uint32_t>(physical_address)
-             : 0;
-}
-
 bool SupportedDepthFormat(nrhi::Format format) {
   return format == nrhi::Format::kD24_UNORM_S8_UINT ||
          format == nrhi::Format::kD32_FLOAT_S8_UINT;
 }
 
+bool RawTargetStateMatchesDecoded(
+    const rex::graphics::NativeGuestDrawContext::RenderTargetState &state) {
+  constexpr uint32_t kEdramBaseMask = (1u << 12) - 1;
+  constexpr uint32_t kSurfacePitchMask = (1u << 14) - 1;
+  constexpr uint32_t kEdramModeMask = (1u << 3) - 1;
+  return state.valid &&
+         (state.rb_color_info_0 & kEdramBaseMask) == state.color_edram_base &&
+         (state.rb_depth_info & kEdramBaseMask) == state.depth_edram_base &&
+         (state.rb_surface_info & kSurfacePitchMask) == state.surface_pitch &&
+         (state.rb_modecontrol & kEdramModeMask) == state.edram_mode;
+}
+
+bool IsExactMainTarget(const rex::graphics::NativeGuestDrawContext &context) {
+  const auto &target = context.render_target_state;
+  return RawTargetStateMatchesDecoded(target) &&
+         target.color_edram_base == kMainColorEdramBase &&
+         target.depth_edram_base == kMainDepthEdramBase &&
+         target.surface_pitch == kMainSurfacePitch &&
+         target.edram_mode == kColorDepthEdramMode;
+}
+
 bool IsMainPassCallback(const rex::graphics::NativeGuestDrawContext &context) {
-  return context.render_pass_key_valid &&
-         context.render_pass_key == kMainRenderPassKey;
+  // render_pass_key_valid distinguishes the authoritative late callback from
+  // the optional early replacement probe. The key itself is a backend cache
+  // identity and is deliberately not used to identify the guest target.
+  return context.render_pass_key_valid && IsExactMainTarget(context);
 }
 
 bool IsCompleteMainEvent(const rex::graphics::NativeGuestDrawContext &context,
                          const MainCoverageDrawIdentity &identity) {
   return context.backend == rex::graphics::NativeGuestOutputBackend::kVulkan &&
          context.backend_frame_sequence != 0 && identity.valid() &&
-         context.surface_pitch == kMainSurfacePitch && context.indexed &&
+         IsExactMainTarget(context) && context.indexed &&
          context.guest_index_base_valid && context.vertex_shader_hash != 0 &&
          context.pixel_shader_hash != 0 && context.draw_state_contract_valid &&
+         context.rasterizer_mode_control_valid &&
+         context.borrowed_attachment_contract_valid &&
+         context.color_attachment_count == 1 &&
+         context.color_attachment_formats[0] == nrhi::Format::kR8G8B8A8_UNORM &&
+         SupportedDepthFormat(context.depth_attachment_format) &&
+         context.stencil_attachment_format == context.depth_attachment_format &&
+         context.sample_count == kRequiredSampleCount &&
+         context.sample_mask == std::numeric_limits<uint64_t>::max();
+}
+
+uint32_t LoadBeU32(const uint8_t *source) {
+  uint32_t value = 0;
+  std::memcpy(&value, source, sizeof(value));
+  return std::byteswap(value);
+}
+
+float LoadBeF32(const uint8_t *source) {
+  return std::bit_cast<float>(LoadBeU32(source));
+}
+
+uint64_t Fingerprint(std::span<const uint8_t> bytes) {
+  uint64_t hash = kFnvOffsetBasis;
+  for (uint8_t value : bytes) {
+    hash = (hash ^ value) * kFnvPrime;
+  }
+  return hash;
+}
+
+bool TryCopyStablePhysicalPrefix(uint32_t physical_address,
+                                 std::span<uint8_t> destination) {
+  rex::system::KernelState *kernel_state = rex::system::kernel_state();
+  if (kernel_state == nullptr || kernel_state->memory() == nullptr ||
+      physical_address == 0 || physical_address > kPhysicalAddressMask ||
+      destination.empty()) {
+    return false;
+  }
+  uint8_t *guest_base = kernel_state->memory()->virtual_membase();
+  if (guest_base == nullptr) {
+    return false;
+  }
+  const uint32_t alias = kPhysicalAliasBase | physical_address;
+  std::array<uint8_t,
+             MainCoverageVertexColorRectangleProof::kGuestControlVertexCount *
+                 MainCoverageVertexColorRectangleProof::kVertexStride>
+      verification{};
+  if (destination.size() != verification.size() ||
+      !GuestTryCopy(destination.data(),
+                    guest_base + alias + REX_PHYS_HOST_OFFSET(alias),
+                    destination.size()) ||
+      !GuestTryCopy(verification.data(),
+                    guest_base + alias + REX_PHYS_HOST_OFFSET(alias),
+                    verification.size())) {
+    return false;
+  }
+  return std::ranges::equal(destination, verification);
+}
+
+MainCoverageVertexColorRectangleProof CaptureVertexColorRectangleProof(
+    const rex::graphics::NativeGuestDrawContext &context) {
+  MainCoverageVertexColorRectangleProof proof;
+  proof.vertex_physical_address = context.primary_vertex_fetch.physical_address;
+  proof.vertex_byte_count = context.primary_vertex_fetch.byte_count;
+  proof.vertex_endian = context.primary_vertex_fetch.endian;
+  proof.color_write_enabled = context.draw_state_contract_valid &&
+                              (context.normalized_color_mask & 0xFu) != 0;
+
+  constexpr size_t kPayloadSize =
+      MainCoverageVertexColorRectangleProof::kGuestControlVertexCount *
+      MainCoverageVertexColorRectangleProof::kVertexStride;
+  std::array<uint8_t, kPayloadSize> payload{};
+  if (!context.primary_vertex_fetch.valid ||
+      proof.vertex_physical_address == 0 ||
+      proof.vertex_byte_count < payload.size() ||
+      proof.vertex_endian != kVertexEndian8In32 ||
+      !TryCopyStablePhysicalPrefix(proof.vertex_physical_address, payload)) {
+    return proof;
+  }
+  proof.payload_stable = true;
+  proof.payload_bytes = payload;
+  proof.payload_fingerprint = Fingerprint(payload);
+  for (size_t vertex = 0;
+       vertex < MainCoverageVertexColorRectangleProof::kGuestControlVertexCount;
+       ++vertex) {
+    const uint8_t *source =
+        payload.data() +
+        vertex * MainCoverageVertexColorRectangleProof::kVertexStride;
+    for (size_t component = 0; component < 3; ++component) {
+      proof.positions[vertex * 3 + component] =
+          LoadBeF32(source + component * sizeof(float));
+    }
+    for (size_t component = 0; component < 4; ++component) {
+      const uint32_t bits = LoadBeU32(source + (3 + component) * sizeof(float));
+      proof.color_bits[vertex * 4 + component] = bits;
+      proof.colors[vertex * 4 + component] = std::bit_cast<float>(bits);
+    }
+  }
+  proof.positions_finite = std::ranges::all_of(
+      proof.positions, [](float value) { return std::isfinite(value); });
+  if (!proof.positions_finite) {
+    return proof;
+  }
+  const float x0 = proof.positions[0];
+  const float y0 = proof.positions[1];
+  const float z0 = proof.positions[2];
+  const float x1 = proof.positions[3];
+  const float y1 = proof.positions[4];
+  const float z1 = proof.positions[5];
+  const float x2 = proof.positions[6];
+  const float y2 = proof.positions[7];
+  const float z2 = proof.positions[8];
+  // This is the Xenos rectangle-list's three-corner representation:
+  // top-left, top-right, bottom-left. The backend synthesizes bottom-right and
+  // emits a four-index triangle strip.
+  proof.rectangle_geometry_valid =
+      x1 > x0 && y2 > y0 && y1 == y0 && x2 == x0 && z1 == z0 && z2 == z0;
+
+  constexpr std::array<uint32_t, 12> kExpectedColorBits = {
+      0x3F800000u, kObservedRectangleNanBits, 0x00000000u, 0x00000000u,
+      0x3F800000u, kObservedRectangleNanBits, 0x3F800000u, 0x00000000u,
+      0x3F800000u, kObservedRectangleNanBits, 0x00000000u, 0x3F800000u,
+  };
+  proof.color_payload_contract_valid = proof.color_bits == kExpectedColorBits;
+  return proof;
+}
+
+bool ExactVertexColorRectanglePipeline(
+    const rex::graphics::NativeGuestDrawContext &context) {
+  return context.backend == rex::graphics::NativeGuestOutputBackend::kVulkan &&
+         context.backend_frame_sequence != 0 &&
+         context.vertex_shader_hash == kMainPrefixVertexShaderHash &&
+         context.pixel_shader_hash == kMainPrefixPixelShaderHash &&
+         context.primitive_type == kRectangleListPrimitive &&
+         context.guest_vertex_or_index_count == 3 &&
+         // RexGlue expands the guest's auto-indexed three-vertex rectangle
+         // list into a four-index host draw before this callback.
+         context.vertex_or_index_count == 4 && context.indexed &&
+         !context.guest_index_base_valid && IsExactMainTarget(context) &&
+         context.draw_state_contract_valid &&
          context.rasterizer_mode_control_valid &&
          context.borrowed_attachment_contract_valid &&
          context.color_attachment_count == 1 &&
@@ -165,8 +335,20 @@ CaptureBackendContract(const rex::graphics::NativeGuestDrawContext &context,
                        const MainCoverageDrawIdentity &identity) {
   MainCoverageBackendContract contract;
   contract.backend = static_cast<uint32_t>(context.backend);
+  contract.host_vertex_or_index_count = context.vertex_or_index_count;
+  contract.primary_vertex_physical_address =
+      context.primary_vertex_fetch.physical_address;
+  contract.primary_vertex_byte_count = context.primary_vertex_fetch.byte_count;
+  contract.primary_vertex_endian = context.primary_vertex_fetch.endian;
   contract.render_pass_key = context.render_pass_key;
-  contract.surface_pitch = context.surface_pitch;
+  contract.rb_color_info_0 = context.render_target_state.rb_color_info_0;
+  contract.rb_depth_info = context.render_target_state.rb_depth_info;
+  contract.rb_surface_info = context.render_target_state.rb_surface_info;
+  contract.rb_modecontrol = context.render_target_state.rb_modecontrol;
+  contract.color_edram_base = context.render_target_state.color_edram_base;
+  contract.depth_edram_base = context.render_target_state.depth_edram_base;
+  contract.edram_mode = context.render_target_state.edram_mode;
+  contract.surface_pitch = context.render_target_state.surface_pitch;
   contract.normalized_depth_control = context.normalized_depth_control;
   contract.normalized_color_mask = context.normalized_color_mask;
   contract.color_control = context.color_control;
@@ -185,7 +367,12 @@ CaptureBackendContract(const rex::graphics::NativeGuestDrawContext &context,
       static_cast<uint32_t>(context.stencil_attachment_format);
   contract.sample_count = context.sample_count;
   contract.sample_mask = context.sample_mask;
+  contract.indexed = context.indexed;
+  contract.primary_vertex_fetch_valid = context.primary_vertex_fetch.valid;
   contract.primitive_restart_enabled = context.primitive_restart_enabled;
+  contract.render_target_state_valid =
+      context.render_target_state.valid &&
+      RawTargetStateMatchesDecoded(context.render_target_state);
   contract.rasterizer_mode_control_valid =
       context.rasterizer_mode_control_valid;
   contract.draw_state_contract_valid = context.draw_state_contract_valid;
@@ -201,7 +388,7 @@ CatalogIdentity(const SceneCatalogDrawOccurrence &draw) {
       .primitive_type = draw.primitive_type,
       .submitted_index_count = draw.submitted_index_count,
       .physical_index_base =
-          PhysicalAddressForVirtualAlias(draw.mesh.index_buffer_alias),
+          GuestPhysicalAddressForVirtualAlias(draw.mesh.index_buffer_alias),
   };
 }
 
@@ -341,6 +528,96 @@ void AttachVenue14DLocked(
   }
   AttachAssignmentsLocked(family->sequence,
                           MainCoverageAssignmentFamily::kVenue14D,
+                          MainCoverageAssignmentProof::kSameFrameBackendProof,
+                          std::move(assignments));
+}
+
+void AttachVenue9ELocked(
+    const std::shared_ptr<const Venue9EFrameSnapshot> &family) {
+  if (family == nullptr || !family->valid()) {
+    return;
+  }
+  std::vector<FamilyAssignment> assignments;
+  assignments.reserve(family->draws.size());
+  for (const Venue9EDrawSnapshot &draw : family->draws) {
+    if (!draw.valid()) {
+      return;
+    }
+    assignments.push_back({
+        .ordinal = draw.title->ordinal,
+        .identity =
+            {
+                .primitive_type = draw.backend_identity.primitive_type,
+                .submitted_index_count =
+                    draw.backend_identity.submitted_index_count,
+                .physical_index_base = draw.backend_identity.guest_index_base,
+            },
+        .vertex_shader_hash = draw.backend.vertex_shader_hash,
+        .pixel_shader_hash = draw.backend.pixel_shader_hash,
+    });
+  }
+  AttachAssignmentsLocked(family->sequence,
+                          MainCoverageAssignmentFamily::kVenue9E,
+                          MainCoverageAssignmentProof::kSameFrameBackendProof,
+                          std::move(assignments));
+}
+
+void AttachPlayerA406Locked(
+    const std::shared_ptr<const PlayerA406FrameSnapshot> &family) {
+  if (family == nullptr || !family->valid()) {
+    return;
+  }
+  std::vector<FamilyAssignment> assignments;
+  assignments.reserve(family->draws.size());
+  for (const PlayerA406DrawSnapshot &draw : family->draws) {
+    if (!draw.valid()) {
+      return;
+    }
+    assignments.push_back({
+        .ordinal = draw.title->ordinal,
+        .identity =
+            {
+                .primitive_type = draw.backend_identity.primitive_type,
+                .submitted_index_count =
+                    draw.backend_identity.submitted_index_count,
+                .physical_index_base = draw.backend_identity.guest_index_base,
+            },
+        .vertex_shader_hash = draw.backend.vertex_shader_hash,
+        .pixel_shader_hash = draw.backend.pixel_shader_hash,
+    });
+  }
+  AttachAssignmentsLocked(family->sequence,
+                          MainCoverageAssignmentFamily::kPlayerA406,
+                          MainCoverageAssignmentProof::kSameFrameBackendProof,
+                          std::move(assignments));
+}
+
+void AttachPlayerBBB5Locked(
+    const std::shared_ptr<const PlayerBBB5FrameSnapshot> &family) {
+  if (family == nullptr || !family->valid()) {
+    return;
+  }
+  std::vector<FamilyAssignment> assignments;
+  assignments.reserve(family->draws.size());
+  for (const PlayerBBB5DrawSnapshot &draw : family->draws) {
+    if (!draw.valid()) {
+      return;
+    }
+    assignments.push_back({
+        .ordinal = draw.title->ordinal,
+        .identity =
+            {
+                .primitive_type = draw.backend_identity.primitive_type,
+                .submitted_index_count =
+                    draw.backend_identity.submitted_index_count,
+                .physical_index_base = draw.backend_identity.guest_index_base,
+            },
+        .vertex_shader_hash = draw.backend.vertex_shader_hash,
+        .pixel_shader_hash = draw.backend.pixel_shader_hash,
+    });
+  }
+  AttachAssignmentsLocked(family->sequence,
+                          MainCoverageAssignmentFamily::kPlayerBBB5,
                           MainCoverageAssignmentProof::kSameFrameBackendProof,
                           std::move(assignments));
 }
@@ -805,6 +1082,8 @@ void CaptureBackendOnlyEvents(const FrameLedger &frame,
         .pixel_shader_hash = event.pixel_shader_hash,
         .backend = event.contract,
         .region = region,
+        .classification = event.classification,
+        .vertex_color_rectangle = event.vertex_color_rectangle,
         .tile_ordinal = tile_ordinal,
         .tile_event_offset = tile_event_offset,
     });
@@ -919,12 +1198,13 @@ FinalizeFrame(const FrameLedger &frame) {
   for (const TileTitleMatch &match : alignment.matches) {
     const BackendEvent &first =
         frame.backend_events[extraction.start_event + match.backend_offset];
-    const BackendEvent &second = frame.backend_events
-        [extraction.start_event + extraction.draws_per_tile +
-         match.backend_offset];
-    const BackendEvent &third = frame.backend_events
-        [extraction.start_event + extraction.draws_per_tile * 2 +
-         match.backend_offset];
+    const BackendEvent &second =
+        frame.backend_events[extraction.start_event +
+                             extraction.draws_per_tile + match.backend_offset];
+    const BackendEvent &third =
+        frame.backend_events[extraction.start_event +
+                             extraction.draws_per_tile * 2 +
+                             match.backend_offset];
     if (!CoreEventComplete(first, frame.sequence) ||
         !CoreEventComplete(second, frame.sequence) ||
         !CoreEventComplete(third, frame.sequence) ||
@@ -1026,18 +1306,73 @@ const char *BackendOnlyRegionName(MainCoverageBackendOnlyRegion region) {
   return "unknown";
 }
 
+const char *BackendOnlyClassificationName(
+    MainCoverageBackendOnlyClassification classification) {
+  switch (classification) {
+  case MainCoverageBackendOnlyClassification::kUnclassified:
+    return "unclassified";
+  case MainCoverageBackendOnlyClassification::kVertexColorRectangleOutput:
+    return "vertex_color_rectangle_output";
+  }
+  return "unknown";
+}
+
 void LogBackendOnlyEvents(const MainCoverageFrameSnapshot &snapshot) {
   for (const MainCoverageBackendOnlyEvent &event :
        snapshot.backend_only_events) {
     REXLOG_INFO(
         "  MAIN backend-only event: index={} region={} tile={} offset={} "
         "primitive={} count={} base={:08X} vs={:016X} ps={:016X} "
-        "contract_complete={} covered=false",
+        "contract_complete={} "
+        "state[depth={:08X} mask={:08X} color={:08X} blend={:08X} "
+        "raster={:08X} samples={} sample_mask={:016X}] "
+        "draw[indexed={} host_count={} vf95={:08X}/{} endian={} valid={}] "
+        "classification={} "
+        "payload[stable={} fingerprint={:016X} positions_finite={} "
+        "rectangle_geometry={} color_contract={} "
+        "color_write={} p0={:.6g},{:.6g},{:.6g} "
+        "p1={:.6g},{:.6g},{:.6g} p2={:.6g},{:.6g},{:.6g}] "
+        "colors[c0={:.6g},{:.6g},{:.6g},{:.6g} "
+        "c1={:.6g},{:.6g},{:.6g},{:.6g}] "
+        "covered=false",
         event.backend_event_index, BackendOnlyRegionName(event.region),
         event.tile_ordinal, event.tile_event_offset,
         event.identity.primitive_type, event.identity.submitted_index_count,
         event.identity.physical_index_base, event.vertex_shader_hash,
-        event.pixel_shader_hash, event.backend.complete);
+        event.pixel_shader_hash, event.backend.complete,
+        event.backend.normalized_depth_control,
+        event.backend.normalized_color_mask, event.backend.color_control,
+        event.backend.blend_control_0, event.backend.rasterizer_mode_control,
+        event.backend.sample_count, event.backend.sample_mask,
+        event.backend.indexed, event.backend.host_vertex_or_index_count,
+        event.backend.primary_vertex_physical_address,
+        event.backend.primary_vertex_byte_count,
+        event.backend.primary_vertex_endian,
+        event.backend.primary_vertex_fetch_valid,
+        BackendOnlyClassificationName(event.classification),
+        event.vertex_color_rectangle.payload_stable,
+        event.vertex_color_rectangle.payload_fingerprint,
+        event.vertex_color_rectangle.positions_finite,
+        event.vertex_color_rectangle.rectangle_geometry_valid,
+        event.vertex_color_rectangle.color_payload_contract_valid,
+        event.vertex_color_rectangle.color_write_enabled,
+        event.vertex_color_rectangle.positions[0],
+        event.vertex_color_rectangle.positions[1],
+        event.vertex_color_rectangle.positions[2],
+        event.vertex_color_rectangle.positions[3],
+        event.vertex_color_rectangle.positions[4],
+        event.vertex_color_rectangle.positions[5],
+        event.vertex_color_rectangle.positions[6],
+        event.vertex_color_rectangle.positions[7],
+        event.vertex_color_rectangle.positions[8],
+        event.vertex_color_rectangle.colors[0],
+        event.vertex_color_rectangle.colors[1],
+        event.vertex_color_rectangle.colors[2],
+        event.vertex_color_rectangle.colors[3],
+        event.vertex_color_rectangle.colors[4],
+        event.vertex_color_rectangle.colors[5],
+        event.vertex_color_rectangle.colors[6],
+        event.vertex_color_rectangle.colors[7]);
   }
 }
 
@@ -1061,6 +1396,7 @@ void LogSnapshot(const MainCoverageFrameSnapshot &snapshot) {
     LogBackendOnlyEvents(snapshot);
     return;
   }
+  const MainCoverageBackendContract &target = snapshot.draws.front().backend;
   REXLOG_INFO(
       "Table Tennis MAIN coverage ledger: frame={} logical_main={} "
       "backend_events={} raw_tile_events={} maximal_phases={}[starts={}] "
@@ -1068,7 +1404,10 @@ void LogSnapshot(const MainCoverageFrameSnapshot &snapshot) {
       "backend_only={}[prefix={} interleaved={} suffix={}] "
       "catalog_matched={} catalog_read_failures={} assigned={} unassigned={} "
       "all_ordinals_assigned={} backend_events_covered={} "
-      "same_frame_proven={} observer_only=true",
+      "same_frame_proven={} "
+      "target_raw[color={:08X} depth={:08X} surface={:08X} mode={:08X}] "
+      "target_decoded[color_base={:03X} depth_base={:03X} pitch={} mode={}] "
+      "render_pass_key={:08X} observer_only=true",
       snapshot.sequence, snapshot.logical_main_draw_count,
       snapshot.backend_event_count, snapshot.backend_tile_event_count,
       snapshot.backend_maximal_phase_count,
@@ -1081,7 +1420,10 @@ void LogSnapshot(const MainCoverageFrameSnapshot &snapshot) {
       snapshot.catalog_guest_read_failures, snapshot.assigned_draw_count,
       snapshot.unassigned_draw_count, snapshot.all_ordinals_assigned(),
       snapshot.all_backend_events_covered(),
-      snapshot.all_draws_same_frame_proven());
+      snapshot.all_draws_same_frame_proven(), target.rb_color_info_0,
+      target.rb_depth_info, target.rb_surface_info, target.rb_modecontrol,
+      target.color_edram_base, target.depth_edram_base, target.surface_pitch,
+      target.edram_mode, target.render_pass_key);
   LogBackendOnlyEvents(snapshot);
   for (const MainCoverageUnassignedShaderFamily &family :
        snapshot.unassigned_shader_families) {
@@ -1127,6 +1469,9 @@ void NoteFinalizedSnapshotLocked(
   g_logged_first_valid_frame |= snapshot->valid();
   if (!snapshot->valid()) {
     g_last_logged_reject_reason = snapshot->reject_reason;
+  }
+  if (!Ps328TitleCaptureRetired()) {
+    EvaluatePs328TileInvariance(*snapshot);
   }
   g_published_frame = std::move(snapshot);
 }
@@ -1244,6 +1589,17 @@ bool MainCoverageFrameSnapshot::valid() const {
         event.backend_event_index >= backend_event_count) {
       return false;
     }
+    if (event.classification == MainCoverageBackendOnlyClassification::
+                                    kVertexColorRectangleOutput &&
+        (!event.vertex_color_rectangle.valid() ||
+         event.vertex_shader_hash != kMainPrefixVertexShaderHash ||
+         event.pixel_shader_hash != kMainPrefixPixelShaderHash ||
+         event.identity.primitive_type != kRectangleListPrimitive ||
+         event.identity.submitted_index_count != 3 ||
+         event.identity.physical_index_base != 0 || !event.backend.indexed ||
+         event.backend.host_vertex_or_index_count != 4)) {
+      return false;
+    }
     previous_backend_index = event.backend_event_index;
 
     switch (event.region) {
@@ -1345,9 +1701,25 @@ bool MainCoverageLedgerEnabled() {
   return REXCVAR_GET(tabletennis_native_main_coverage_ledger);
 }
 
+namespace {
+
+bool MainCoverageLedgerCollectionEnabled() {
+  return MainCoverageLedgerEnabled();
+}
+
+} // namespace
+
+MainCoverageVertexColorRectangleProof CaptureMainVertexColorRectangleProof(
+    const rex::graphics::NativeGuestDrawContext &context) {
+  if (!ExactVertexColorRectanglePipeline(context)) {
+    return {};
+  }
+  return CaptureVertexColorRectangleProof(context);
+}
+
 void ObserveMainCoverageBackendDraw(
     const rex::graphics::NativeGuestDrawContext &context) {
-  if (!MainCoverageLedgerEnabled() || !IsMainPassCallback(context)) {
+  if (!MainCoverageLedgerCollectionEnabled() || !IsMainPassCallback(context)) {
     return;
   }
   MainCoverageDrawIdentity identity = {
@@ -1363,6 +1735,14 @@ void ObserveMainCoverageBackendDraw(
       .pixel_shader_hash = context.pixel_shader_hash,
       .contract = CaptureBackendContract(context, identity),
   };
+  if (ExactVertexColorRectanglePipeline(context)) {
+    event.vertex_color_rectangle =
+        CaptureMainVertexColorRectangleProof(context);
+    if (event.vertex_color_rectangle.valid()) {
+      event.classification =
+          MainCoverageBackendOnlyClassification::kVertexColorRectangleOutput;
+    }
+  }
 
   std::lock_guard lock(g_ledger_mutex);
   ++g_telemetry.backend_events_observed;
@@ -1378,7 +1758,7 @@ void ObserveMainCoverageBackendDraw(
 
 void ObserveMainCoverageFamilyFrame(
     std::shared_ptr<const VenueFullFamilyFrame> frame) {
-  if (!MainCoverageLedgerEnabled() || frame == nullptr) {
+  if (!MainCoverageLedgerCollectionEnabled() || frame == nullptr) {
     return;
   }
   std::lock_guard lock(g_ledger_mutex);
@@ -1387,7 +1767,7 @@ void ObserveMainCoverageFamilyFrame(
 
 void ObserveMainCoverageFamilyFrame(
     std::shared_ptr<const Venue14DFrameSnapshot> frame) {
-  if (!MainCoverageLedgerEnabled() || frame == nullptr) {
+  if (!MainCoverageLedgerCollectionEnabled() || frame == nullptr) {
     return;
   }
   std::lock_guard lock(g_ledger_mutex);
@@ -1396,7 +1776,7 @@ void ObserveMainCoverageFamilyFrame(
 
 void ObserveMainCoverageFamilyFrame(
     std::shared_ptr<const VenueE33FrameSnapshot> frame) {
-  if (!MainCoverageLedgerEnabled() || frame == nullptr) {
+  if (!MainCoverageLedgerCollectionEnabled() || frame == nullptr) {
     return;
   }
   std::lock_guard lock(g_ledger_mutex);
@@ -1405,7 +1785,7 @@ void ObserveMainCoverageFamilyFrame(
 
 void ObserveMainCoverageFamilyFrame(
     std::shared_ptr<const CrowdFrameSnapshot> frame) {
-  if (!MainCoverageLedgerEnabled() || frame == nullptr) {
+  if (!MainCoverageLedgerCollectionEnabled() || frame == nullptr) {
     return;
   }
   std::lock_guard lock(g_ledger_mutex);
@@ -1414,7 +1794,7 @@ void ObserveMainCoverageFamilyFrame(
 
 void ObserveMainCoverageFamilyFrame(
     std::shared_ptr<const PlayerSkinFrameSnapshot> frame) {
-  if (!MainCoverageLedgerEnabled() || frame == nullptr) {
+  if (!MainCoverageLedgerCollectionEnabled() || frame == nullptr) {
     return;
   }
   std::lock_guard lock(g_ledger_mutex);
@@ -1423,7 +1803,7 @@ void ObserveMainCoverageFamilyFrame(
 
 void ObserveMainCoverageFamilyFrame(
     std::shared_ptr<const D47PlayerFrameSnapshot> frame) {
-  if (!MainCoverageLedgerEnabled() || frame == nullptr) {
+  if (!MainCoverageLedgerCollectionEnabled() || frame == nullptr) {
     return;
   }
   std::lock_guard lock(g_ledger_mutex);
@@ -1432,7 +1812,7 @@ void ObserveMainCoverageFamilyFrame(
 
 void ObserveMainCoverageFamilyFrame(
     std::shared_ptr<const Player6AEFrameSnapshot> frame) {
-  if (!MainCoverageLedgerEnabled() || frame == nullptr) {
+  if (!MainCoverageLedgerCollectionEnabled() || frame == nullptr) {
     return;
   }
   std::lock_guard lock(g_ledger_mutex);
@@ -1441,15 +1821,42 @@ void ObserveMainCoverageFamilyFrame(
 
 void ObserveMainCoverageFamilyFrame(
     std::shared_ptr<const NetBB903FrameSnapshot> frame) {
-  if (!MainCoverageLedgerEnabled() || frame == nullptr) {
+  if (!MainCoverageLedgerCollectionEnabled() || frame == nullptr) {
     return;
   }
   std::lock_guard lock(g_ledger_mutex);
   AttachNetBB903Locked(frame);
 }
 
+void ObserveMainCoverageFamilyFrame(
+    std::shared_ptr<const Venue9EFrameSnapshot> frame) {
+  if (!MainCoverageLedgerCollectionEnabled() || frame == nullptr) {
+    return;
+  }
+  std::lock_guard lock(g_ledger_mutex);
+  AttachVenue9ELocked(frame);
+}
+
+void ObserveMainCoverageFamilyFrame(
+    std::shared_ptr<const PlayerA406FrameSnapshot> frame) {
+  if (!MainCoverageLedgerCollectionEnabled() || frame == nullptr) {
+    return;
+  }
+  std::lock_guard lock(g_ledger_mutex);
+  AttachPlayerA406Locked(frame);
+}
+
+void ObserveMainCoverageFamilyFrame(
+    std::shared_ptr<const PlayerBBB5FrameSnapshot> frame) {
+  if (!MainCoverageLedgerCollectionEnabled() || frame == nullptr) {
+    return;
+  }
+  std::lock_guard lock(g_ledger_mutex);
+  AttachPlayerBBB5Locked(frame);
+}
+
 void MainCoverageLedgerFrameEnd() {
-  const bool enabled = MainCoverageLedgerEnabled();
+  const bool enabled = MainCoverageLedgerCollectionEnabled();
   const std::shared_ptr<const SceneDrawCatalogFrame> catalog =
       enabled ? LatestSceneDrawCatalogFrameSnapshot() : nullptr;
   const ObservedFamilyFrames families =
@@ -1519,6 +1926,12 @@ MainCoverageAssignmentFamilyName(MainCoverageAssignmentFamily family) {
     return "player_6ae";
   case MainCoverageAssignmentFamily::kNetBB903:
     return "net_bb903";
+  case MainCoverageAssignmentFamily::kVenue9E:
+    return "venue_9e";
+  case MainCoverageAssignmentFamily::kPlayerA406:
+    return "player_a406";
+  case MainCoverageAssignmentFamily::kPlayerBBB5:
+    return "player_bbb5";
   }
   return "unknown";
 }

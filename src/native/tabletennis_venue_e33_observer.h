@@ -15,6 +15,11 @@ namespace tabletennis::native {
 
 struct SceneCatalogDrawOccurrence;
 
+inline constexpr uint64_t kVenueE33VertexShaderHash =
+    0x37F2AEC8A23E44E0ull;
+inline constexpr uint64_t kVenueE33PixelShaderHash =
+    0xE33DEAA20A98FCEFull;
+
 struct VenueE33BackendContract {
   uint64_t vertex_shader_hash = 0;
   uint64_t pixel_shader_hash = 0;
@@ -26,6 +31,13 @@ struct VenueE33BackendContract {
   uint32_t blend_control_0 = 0;
   uint32_t rasterizer_mode_control = 0;
   uint32_t primitive_restart_index = 0;
+  uint32_t rb_color_info_0 = 0;
+  uint32_t rb_depth_info = 0;
+  uint32_t rb_surface_info = 0;
+  uint32_t rb_modecontrol = 0;
+  uint32_t color_edram_base = 0;
+  uint32_t depth_edram_base = 0;
+  uint32_t edram_mode = 0;
   std::array<uint32_t, 4> color_attachment_formats{};
   uint32_t color_attachment_count = 0;
   uint32_t depth_attachment_format = 0;
@@ -34,6 +46,7 @@ struct VenueE33BackendContract {
   uint64_t sample_mask = 0;
   bool primitive_restart_enabled = false;
   bool rasterizer_mode_control_valid = false;
+  bool render_target_state_valid = false;
   bool valid = false;
 };
 
@@ -67,8 +80,17 @@ struct VenueE33DrawSnapshot {
   VenueE33BackendContract backend{};
 
   bool valid() const {
-    return title != nullptr && title->valid && backend_identity.valid() &&
-           title->identity == backend_identity && backend.valid;
+    return title != nullptr && title->valid && title->vertices != nullptr &&
+           title->indices != nullptr && backend_identity.valid() &&
+           title->identity == backend_identity && backend.valid &&
+           backend.vertex_shader_hash == kVenueE33VertexShaderHash &&
+           backend.pixel_shader_hash == kVenueE33PixelShaderHash &&
+           backend_identity.guest_index_base ==
+               title->indices->physical_address &&
+           backend_identity.guest_vertex_base ==
+               title->vertices->physical_address &&
+           backend_identity.guest_vertex_bytes == title->vertices->byte_count &&
+           backend_identity.guest_vertex_endian == kVenueE33VertexEndian;
   }
 };
 
@@ -97,8 +119,8 @@ struct VenueE33FrameSnapshot {
   uint32_t payload_copy_failures = 0;
   uint32_t texture_capture_failures = 0;
   uint32_t material_validation_failures = 0;
-  // Retained for telemetry ABI compatibility. Current-frame capture has no
-  // learner generation token, so this is always zero.
+  // Nonzero rejects a frame whose payload capture did not use the exact
+  // learned generation later proven by the backend/title join.
   uint32_t capture_generation_mismatches = 0;
   uint32_t backend_event_count = 0;
   uint32_t backend_draws_per_tile = 0;
@@ -160,9 +182,18 @@ struct VenueE33ObserverTelemetry {
 
 bool VenueE33ObserverEnabled();
 
-// Copies immutable payloads for structurally exact stride-32 candidates in
-// the current title frame. Only a later exact backend-frame hash/order join
-// can select and publish them as E33. This function never suppresses a guest
+// Read-only boundary probe for the already-hooked rage::fx::ApplyPass at
+// 0x82158C48. It arms only for a boot-local pass identity learned by a complete
+// E33 backend proof, snapshots the exact command lists and c20/c255 around the
+// untouched original call, and never writes guest state.
+void BeginVenueE33ApplyPassProbe(uint8_t *guest_base, uint32_t runtime_state,
+                                 uint32_t pass_descriptor);
+void EndVenueE33ApplyPassProbe(uint8_t *guest_base);
+
+// Records cheap metadata for every structurally exact stride-32 candidate.
+// Immutable payloads are copied only for the ordered draw identities learned
+// by an earlier exact backend-frame proof. The current frame is still joined
+// independently before publication. This function never suppresses a guest
 // draw.
 void ObserveVenueE33TitleDraw(uint8_t *guest_base,
                               const SceneCatalogDrawOccurrence &draw);

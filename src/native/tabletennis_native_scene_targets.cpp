@@ -1,10 +1,7 @@
 #include "native/tabletennis_native_scene_targets.h"
 
 #include "native/shaders/tabletennis_native_scene_resolve_spirv.h"
-
-#include <algorithm>
-#include <cmath>
-#include <limits>
+#include "native/tabletennis_offscreen_target_owner.h"
 
 #include <rex/graphics/native_guest_renderer.h>
 
@@ -13,53 +10,39 @@ namespace {
 
 namespace nrhi = rex::graphics::nrhi;
 
-constexpr uint32_t kSceneSampleCount = 4;
-
-enum class PassState : uint8_t {
-  kUnavailable,
-  kReady,
-  kOpen,
+constexpr OffscreenTargetDesc kCustomSceneTargetDesc = {
+    .color_format = nrhi::Format::kR8G8B8A8_UNORM,
+    .depth_format = nrhi::Format::kD32_FLOAT,
+    .sample_count = 4,
 };
 
 struct Resources {
   nrhi::Device *device = nullptr;
-  nrhi::Texture *color = nullptr;
-  nrhi::Texture *depth = nullptr;
-  nrhi::TextureView *resolve_source = nullptr;
   nrhi::BindingLayout *resolve_layout = nullptr;
   nrhi::Shader *resolve_vertex_shader = nullptr;
   nrhi::Shader *resolve_pixel_shader = nullptr;
   nrhi::Pipeline *resolve_pipeline = nullptr;
   nrhi::Format presenter_format = nrhi::Format::kUnknown;
-  uint32_t width = 0;
-  uint32_t height = 0;
-  PassState state = PassState::kUnavailable;
 };
 
 Resources g_resources;
+OffscreenTargetOwner g_target_owner;
 
 void ReleaseResources() {
   if (g_resources.device != nullptr) {
     g_resources.device->DestroyDeferred(g_resources.resolve_pipeline);
     g_resources.device->DestroyDeferred(g_resources.resolve_vertex_shader);
     g_resources.device->DestroyDeferred(g_resources.resolve_pixel_shader);
-    g_resources.device->DestroyDeferred(g_resources.resolve_source);
-    g_resources.device->DestroyDeferred(g_resources.color);
-    g_resources.device->DestroyDeferred(g_resources.depth);
   }
   // Binding layouts follow the device lifetime.
   g_resources = {};
+  g_target_owner.Shutdown();
 }
 
 bool EnsureDevice(
     const rex::graphics::NativeGuestOutputRenderContext &context) {
   if (context.device == nullptr || context.cmd == nullptr ||
-      context.guest_output == nullptr || context.guest_output_width == 0 ||
-      context.guest_output_height == 0 ||
-      context.guest_output_width >
-          static_cast<uint32_t>(std::numeric_limits<int32_t>::max()) ||
-      context.guest_output_height >
-          static_cast<uint32_t>(std::numeric_limits<int32_t>::max())) {
+      context.guest_output == nullptr) {
     return false;
   }
   if (g_resources.device != nullptr && g_resources.device != context.device) {
@@ -140,87 +123,6 @@ bool EnsureResolveResources(
   return true;
 }
 
-bool EnsureAttachments(
-    const rex::graphics::NativeGuestOutputRenderContext &context) {
-  if (g_resources.color != nullptr && g_resources.depth != nullptr &&
-      g_resources.resolve_source != nullptr &&
-      g_resources.width == context.guest_output_width &&
-      g_resources.height == context.guest_output_height) {
-    return true;
-  }
-
-  nrhi::TextureDesc color;
-  color.width = context.guest_output_width;
-  color.height = context.guest_output_height;
-  color.sample_count = kSceneSampleCount;
-  color.format = nrhi::Format::kR8G8B8A8_UNORM;
-  color.usage = nrhi::kTextureUsageRenderTarget;
-  color.initial_state = nrhi::ResourceState::kRenderTarget;
-  nrhi::Texture *const new_color = context.device->CreateTexture(color);
-
-  nrhi::TextureDesc depth;
-  depth.width = context.guest_output_width;
-  depth.height = context.guest_output_height;
-  depth.sample_count = kSceneSampleCount;
-  depth.format = nrhi::Format::kD32_FLOAT;
-  depth.usage = nrhi::kTextureUsageDepthStencil;
-  depth.initial_state = nrhi::ResourceState::kDepthWrite;
-  depth.clear_depth = 1.0f;
-  nrhi::Texture *const new_depth = context.device->CreateTexture(depth);
-  if (new_color == nullptr || new_depth == nullptr) {
-    context.device->DestroyDeferred(new_color);
-    context.device->DestroyDeferred(new_depth);
-    return false;
-  }
-
-  nrhi::TextureViewDesc resolve_view;
-  resolve_view.dimension = nrhi::ViewDimension::k2DMS;
-  resolve_view.mip_levels = 1;
-  nrhi::TextureView *const new_resolve_source =
-      context.device->CreateTextureView(new_color, resolve_view);
-  if (new_resolve_source == nullptr) {
-    context.device->DestroyDeferred(new_color);
-    context.device->DestroyDeferred(new_depth);
-    return false;
-  }
-
-  context.device->DestroyDeferred(g_resources.resolve_source);
-  context.device->DestroyDeferred(g_resources.color);
-  context.device->DestroyDeferred(g_resources.depth);
-  g_resources.resolve_source = new_resolve_source;
-  g_resources.color = new_color;
-  g_resources.depth = new_depth;
-  g_resources.width = context.guest_output_width;
-  g_resources.height = context.guest_output_height;
-  return true;
-}
-
-NativeScenePassTargets CurrentTargets() {
-  return {
-      .color = g_resources.color,
-      .depth = g_resources.depth,
-      .width = g_resources.width,
-      .height = g_resources.height,
-      .sample_count = kSceneSampleCount,
-  };
-}
-
-bool ExactOwnedTargets(const NativeScenePassTargets &targets) {
-  return targets.color == g_resources.color &&
-         targets.depth == g_resources.depth &&
-         targets.width == g_resources.width &&
-         targets.height == g_resources.height &&
-         targets.sample_count == kSceneSampleCount;
-}
-
-bool ValidClearValues(const NativeScenePassClearValues &clear_values) {
-  return std::ranges::all_of(
-             clear_values.color,
-             [](float value) { return std::isfinite(value); }) &&
-         std::isfinite(clear_values.depth) && clear_values.depth >= 0.0f &&
-         clear_values.depth <= 1.0f;
-}
-
 void SetFullOutputArea(nrhi::Cmd *cmd, uint32_t width, uint32_t height) {
   nrhi::Viewport viewport;
   viewport.width = static_cast<float>(width);
@@ -234,32 +136,10 @@ void SetFullOutputArea(nrhi::Cmd *cmd, uint32_t width, uint32_t height) {
 
 void RestoreSteadyStates(
     const rex::graphics::NativeGuestOutputRenderContext &context) {
-  context.cmd->Barrier(g_resources.color,
-                       nrhi::ResourceState::kPixelShaderResource,
-                       nrhi::ResourceState::kRenderTarget);
   context.cmd->Barrier(context.guest_output, nrhi::ResourceState::kRenderTarget,
                        nrhi::ResourceState::kGuestOutput);
   context.cmd->FlushBarriers();
-}
-
-void DiscardOpenPass(
-    const rex::graphics::NativeGuestOutputRenderContext &context) {
-  // Leaving attachment state forces Vulkan to consume any pending clear and
-  // close an open render pass. Both images then return to the states expected
-  // by the next Begin call. The presenter is deliberately untouched.
-  context.cmd->Barrier(g_resources.color, nrhi::ResourceState::kRenderTarget,
-                       nrhi::ResourceState::kPixelShaderResource);
-  context.cmd->Barrier(g_resources.depth, nrhi::ResourceState::kDepthWrite,
-                       nrhi::ResourceState::kPixelShaderResource);
-  context.cmd->FlushBarriers();
-  context.cmd->Barrier(g_resources.color,
-                       nrhi::ResourceState::kPixelShaderResource,
-                       nrhi::ResourceState::kRenderTarget);
-  context.cmd->Barrier(g_resources.depth,
-                       nrhi::ResourceState::kPixelShaderResource,
-                       nrhi::ResourceState::kDepthWrite);
-  context.cmd->FlushBarriers();
-  g_resources.state = PassState::kReady;
+  g_target_owner.RestoreAfterResolve(context);
 }
 
 } // namespace
@@ -268,33 +148,31 @@ NativeSceneRenderTargetsResult PrepareNativeSceneRenderTargets(
     const rex::graphics::NativeGuestOutputRenderContext &context,
     NativeScenePassTargets &targets_out) {
   targets_out = {};
-  if (!EnsureDevice(context) || context.guest_output->sample_count() != 1) {
+  if (!EnsureDevice(context)) {
     return NativeSceneRenderTargetsResult::kInvalidContext;
-  }
-  if (g_resources.state == PassState::kOpen) {
-    return NativeSceneRenderTargetsResult::kPassAlreadyOpen;
-  }
-  if (context.device->GetSupportedSampleCount(nrhi::Format::kR8G8B8A8_UNORM,
-                                              kSceneSampleCount) !=
-          kSceneSampleCount ||
-      context.device->GetSupportedSampleCount(
-          nrhi::Format::kD32_FLOAT, kSceneSampleCount) != kSceneSampleCount) {
-    return NativeSceneRenderTargetsResult::kFourSampleUnsupported;
   }
   if (!EnsureResolveResources(context)) {
     return NativeSceneRenderTargetsResult::kResolveResourcesFailed;
   }
-  if (!EnsureAttachments(context)) {
+  const OffscreenTargetOwnerResult owner_result =
+      g_target_owner.Prepare(context, kCustomSceneTargetDesc, targets_out);
+  if (owner_result == OffscreenTargetOwnerResult::kPassAlreadyOpen) {
+    return NativeSceneRenderTargetsResult::kPassAlreadyOpen;
+  }
+  if (owner_result == OffscreenTargetOwnerResult::kSampleCountUnsupported) {
+    return NativeSceneRenderTargetsResult::kFourSampleUnsupported;
+  }
+  if (owner_result == OffscreenTargetOwnerResult::kAttachmentCreationFailed) {
     return NativeSceneRenderTargetsResult::kAttachmentCreationFailed;
   }
-
-  targets_out = CurrentTargets();
+  if (owner_result != OffscreenTargetOwnerResult::kSucceeded) {
+    return NativeSceneRenderTargetsResult::kInvalidTargets;
+  }
   if (ValidateNativeScenePassTargets(context, targets_out) !=
       NativeScenePassTargetValidation::kValid) {
     targets_out = {};
     return NativeSceneRenderTargetsResult::kInvalidTargets;
   }
-  g_resources.state = PassState::kReady;
   return NativeSceneRenderTargetsResult::kSucceeded;
 }
 
@@ -302,43 +180,35 @@ NativeSceneRenderTargetsResult BeginNativeSceneRenderPass(
     const rex::graphics::NativeGuestOutputRenderContext &context,
     const NativeScenePassTargets &targets,
     const NativeScenePassClearValues &clear_values) {
-  if (!EnsureDevice(context)) {
+  const OffscreenTargetOwnerResult result = g_target_owner.Begin(
+      context, targets, clear_values.color, clear_values.depth);
+  switch (result) {
+  case OffscreenTargetOwnerResult::kSucceeded:
+    return NativeSceneRenderTargetsResult::kSucceeded;
+  case OffscreenTargetOwnerResult::kInvalidContext:
     return NativeSceneRenderTargetsResult::kInvalidContext;
-  }
-  if (g_resources.state == PassState::kOpen) {
+  case OffscreenTargetOwnerResult::kPassAlreadyOpen:
     return NativeSceneRenderTargetsResult::kPassAlreadyOpen;
-  }
-  if (g_resources.state != PassState::kReady || !ExactOwnedTargets(targets) ||
-      ValidateNativeScenePassTargets(context, targets) !=
-          NativeScenePassTargetValidation::kValid) {
+  case OffscreenTargetOwnerResult::kInvalidClearValues:
+    return NativeSceneRenderTargetsResult::kInvalidClearValues;
+  default:
     return NativeSceneRenderTargetsResult::kInvalidTargets;
   }
-  if (!ValidClearValues(clear_values)) {
-    return NativeSceneRenderTargetsResult::kInvalidClearValues;
-  }
-
-  SetFullOutputArea(context.cmd, targets.width, targets.height);
-  context.cmd->SetRenderTargets(targets.color, targets.depth);
-  context.cmd->ClearRenderTarget(targets.color, clear_values.color.data());
-  context.cmd->ClearDepth(targets.depth, clear_values.depth);
-  g_resources.state = PassState::kOpen;
-  return NativeSceneRenderTargetsResult::kSucceeded;
 }
 
 NativeSceneRenderTargetsResult AbortNativeSceneRenderPass(
     const rex::graphics::NativeGuestOutputRenderContext &context) {
-  if (!EnsureDevice(context)) {
+  const OffscreenTargetOwnerResult result = g_target_owner.Abort(context);
+  if (result == OffscreenTargetOwnerResult::kSucceeded) {
+    return NativeSceneRenderTargetsResult::kSucceeded;
+  }
+  if (result == OffscreenTargetOwnerResult::kInvalidContext) {
     return NativeSceneRenderTargetsResult::kInvalidContext;
   }
-  if (g_resources.state != PassState::kOpen) {
+  if (result == OffscreenTargetOwnerResult::kPassNotOpen) {
     return NativeSceneRenderTargetsResult::kPassNotOpen;
   }
-  if (g_resources.color == nullptr || g_resources.depth == nullptr) {
-    g_resources.state = PassState::kUnavailable;
-    return NativeSceneRenderTargetsResult::kInvalidTargets;
-  }
-  DiscardOpenPass(context);
-  return NativeSceneRenderTargetsResult::kSucceeded;
+  return NativeSceneRenderTargetsResult::kInvalidTargets;
 }
 
 NativeSceneRenderTargetsResult ResolveNativeSceneRenderPass(
@@ -347,21 +217,24 @@ NativeSceneRenderTargetsResult ResolveNativeSceneRenderPass(
   if (!EnsureDevice(context)) {
     return NativeSceneRenderTargetsResult::kInvalidContext;
   }
-  if (g_resources.state != PassState::kOpen) {
-    return NativeSceneRenderTargetsResult::kPassNotOpen;
-  }
-  if (!ExactOwnedTargets(targets) ||
-      ValidateNativeScenePassTargets(context, targets) !=
+  if (ValidateNativeScenePassTargets(context, targets) !=
           NativeScenePassTargetValidation::kValid ||
-      g_resources.resolve_source == nullptr ||
       g_resources.resolve_layout == nullptr ||
       g_resources.resolve_pipeline == nullptr) {
-    DiscardOpenPass(context);
+    g_target_owner.Abort(context);
     return NativeSceneRenderTargetsResult::kInvalidTargets;
   }
 
-  context.cmd->Barrier(g_resources.color, nrhi::ResourceState::kRenderTarget,
-                       nrhi::ResourceState::kPixelShaderResource);
+  const OffscreenTargetOwnerResult resolve_result =
+      g_target_owner.PrepareForResolve(context, targets);
+  if (resolve_result == OffscreenTargetOwnerResult::kPassNotOpen) {
+    return NativeSceneRenderTargetsResult::kPassNotOpen;
+  }
+  if (resolve_result != OffscreenTargetOwnerResult::kSucceeded ||
+      g_target_owner.resolve_source() == nullptr) {
+    g_target_owner.Abort(context);
+    return NativeSceneRenderTargetsResult::kInvalidTargets;
+  }
   context.cmd->Barrier(context.guest_output, nrhi::ResourceState::kGuestOutput,
                        nrhi::ResourceState::kRenderTarget);
   context.cmd->FlushBarriers();
@@ -369,19 +242,17 @@ NativeSceneRenderTargetsResult ResolveNativeSceneRenderPass(
   SetFullOutputArea(context.cmd, targets.width, targets.height);
   context.cmd->SetBindingLayout(g_resources.resolve_layout);
   context.cmd->SetPipeline(g_resources.resolve_pipeline);
-  context.cmd->SetTexture(0, g_resources.resolve_source);
+  context.cmd->SetTexture(0, g_target_owner.resolve_source());
   context.cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
   // Vulkan resolves pipeline/descriptor state lazily; D3D12 verifies its
   // eagerly recorded texture-table binding. Neither backend reaches Draw
   // unless the complete resolve state is ready.
   if (!context.cmd->PreflightDraw()) {
     RestoreSteadyStates(context);
-    g_resources.state = PassState::kReady;
     return NativeSceneRenderTargetsResult::kResolvePreflightFailed;
   }
   context.cmd->Draw(3, 0);
   RestoreSteadyStates(context);
-  g_resources.state = PassState::kReady;
   return NativeSceneRenderTargetsResult::kSucceeded;
 }
 

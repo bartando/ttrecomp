@@ -23,6 +23,8 @@ constexpr uint32_t kPhysicalAliasBase = 0xA0000000;
 constexpr uint32_t kPhysicalAddressMask = 0x1FFFFFFF;
 constexpr uint32_t kHighPhysicalHeapBase = 0xE0000000;
 constexpr uint32_t kHighPhysicalHeapHostPageOffset = 0x1000;
+constexpr uint32_t kVertexStride40 = 40;
+constexpr uint32_t kVertexStride48 = 48;
 
 constexpr uint32_t kEarlyPass = 0x402E78A8;
 constexpr uint32_t kEarlyProgram = 0x402EAE80;
@@ -379,6 +381,11 @@ CaptureVenue14DTitleDraw(uint8_t *guest_base,
       !IsExactTitleProgram(draw) || !draw.mesh.valid ||
       draw.primitive_type != kTriangleStripPrimitive ||
       draw.mesh.aggregate_primitive_type != kTriangleStripPrimitive ||
+      (draw.mesh.vertex_stride != kVertexStride40 &&
+       draw.mesh.vertex_stride != kVertexStride48) ||
+      draw.mesh.vertex_endian != kVenue14DVertexEndian ||
+      draw.mesh.vertex_buffer_bytes < draw.mesh.vertex_stride ||
+      draw.mesh.vertex_buffer_bytes % draw.mesh.vertex_stride != 0 ||
       draw.submitted_index_count == 0 ||
       draw.mesh.index_element_size != sizeof(uint16_t) ||
       draw.mesh.index_is_32_bit) {
@@ -395,6 +402,10 @@ CaptureVenue14DTitleDraw(uint8_t *guest_base,
       .primitive_type = draw.primitive_type,
       .submitted_index_count = draw.submitted_index_count,
       .guest_index_base = index_base,
+      .guest_vertex_base =
+          PhysicalAddressForVirtualAlias(draw.mesh.vertex_buffer_alias),
+      .guest_vertex_bytes = draw.mesh.vertex_buffer_bytes,
+      .guest_vertex_endian = draw.mesh.vertex_endian,
   };
 
   auto snapshot = std::make_shared<Venue14DTitleDrawSnapshot>();

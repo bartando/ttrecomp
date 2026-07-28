@@ -1,5 +1,6 @@
 #include "native/tabletennis_6ae_player_observer.h"
 
+#include "native/tabletennis_6ae_player_renderer.h"
 #include "native/tabletennis_frame_scene.h"
 #include "native/tabletennis_main_coverage_ledger.h"
 #include "native/tabletennis_scene_draw_catalog.h"
@@ -28,11 +29,16 @@ namespace {
 namespace nrhi = rex::graphics::nrhi;
 
 constexpr uint32_t kTriangleStripPrimitive = 6;
+constexpr uint32_t kGameplayRenderPassKey = 0x0000000E;
 constexpr uint32_t kExpectedSurfacePitch = 1280;
+constexpr uint32_t kMainColorEdramBase = 0x400;
+constexpr uint32_t kMainDepthEdramBase = 0;
+constexpr uint32_t kMainEdramMode = 4;
 constexpr uint32_t kExpectedDepthControl = 0x00700736;
 constexpr uint32_t kExpectedColorMask = 0x0000000F;
 constexpr uint32_t kExpectedColorControl = 0x87000005;
 constexpr uint32_t kExpectedBlendControl = 0x00010001;
+constexpr uint32_t kExpectedRasterizerModeControl = 0x00018002;
 constexpr uint32_t kRequiredTileBlockCount = 3;
 constexpr uint64_t kVertexShaderHash = 0xBBB580AA5620D2A6ull;
 constexpr uint64_t kPixelShaderHash = 0x6AE43640A86B33D8ull;
@@ -45,6 +51,13 @@ struct TitleToken {
   Player6AEDrawIdentity identity{};
   SceneCatalogPassIdentity program{};
   std::shared_ptr<const Player6AEDrawSnapshot> snapshot;
+  uint32_t ordinal = 0;
+  uint32_t guest_read_failures = 0;
+  uint32_t payload_copy_failures = 0;
+  uint32_t texture_capture_failures = 0;
+  uint32_t sampler_contract_failures = 0;
+  uint32_t sampler_contract_failure_mask = 0;
+  uint32_t shared_resource_capture_failures = 0;
 };
 
 struct BackendEvent {
@@ -61,6 +74,8 @@ struct FrameLedger {
   uint32_t guest_read_failures = 0;
   uint32_t payload_copy_failures = 0;
   uint32_t texture_capture_failures = 0;
+  uint32_t sampler_contract_failures = 0;
+  uint32_t shared_resource_capture_failures = 0;
   uint32_t backend_tile_blocks_matched = 0;
   uint32_t backend_sequence_mismatches = 0;
   std::vector<TitleToken> tokens;
@@ -85,10 +100,49 @@ bool SupportedDepthFormat(nrhi::Format format) {
          format == nrhi::Format::kD32_FLOAT_S8_UINT;
 }
 
+bool RawTargetStateMatchesDecoded(
+    const rex::graphics::NativeGuestDrawContext::RenderTargetState &state) {
+  constexpr uint32_t kEdramBaseMask = (1u << 12) - 1;
+  constexpr uint32_t kSurfacePitchMask = (1u << 14) - 1;
+  constexpr uint32_t kEdramModeMask = (1u << 3) - 1;
+  return state.valid &&
+         (state.rb_color_info_0 & kEdramBaseMask) ==
+             state.color_edram_base &&
+         (state.rb_depth_info & kEdramBaseMask) ==
+             state.depth_edram_base &&
+         (state.rb_surface_info & kSurfacePitchMask) ==
+             state.surface_pitch &&
+         (state.rb_modecontrol & kEdramModeMask) == state.edram_mode;
+}
+
+bool IsExactMainTarget(
+    const rex::graphics::NativeGuestDrawContext &context) {
+  const auto &target = context.render_target_state;
+  return RawTargetStateMatchesDecoded(target) &&
+         target.color_edram_base == kMainColorEdramBase &&
+         target.depth_edram_base == kMainDepthEdramBase &&
+         target.surface_pitch == kExpectedSurfacePitch &&
+         target.edram_mode == kMainEdramMode &&
+         context.surface_pitch == target.surface_pitch;
+}
+
+bool BackendVertexFetchValid(
+    const rex::graphics::NativeGuestDrawContext &context) {
+  return context.primary_vertex_fetch.valid &&
+         context.primary_vertex_fetch.physical_address != 0 &&
+         context.primary_vertex_fetch.endian == kPlayer6AEVertexEndian &&
+         context.primary_vertex_fetch.byte_count >= 36 &&
+         context.primary_vertex_fetch.byte_count % 36 == 0;
+}
+
 bool IsExactBackendDraw(const rex::graphics::NativeGuestDrawContext &context) {
   return context.backend == rex::graphics::NativeGuestOutputBackend::kVulkan &&
-         context.render_pass_key_valid && context.indexed &&
+         context.render_pass_key_valid &&
+         context.render_pass_key == kGameplayRenderPassKey &&
+         IsExactMainTarget(context) && context.indexed &&
          context.guest_index_base_valid && context.draw_state_contract_valid &&
+         BackendVertexFetchValid(context) &&
+         context.rasterizer_mode_control_valid &&
          context.borrowed_attachment_contract_valid &&
          context.vertex_shader_hash == kVertexShaderHash &&
          context.pixel_shader_hash == kPixelShaderHash &&
@@ -100,6 +154,8 @@ bool IsExactBackendDraw(const rex::graphics::NativeGuestDrawContext &context) {
          context.normalized_color_mask == kExpectedColorMask &&
          context.color_control == kExpectedColorControl &&
          context.blend_control_0 == kExpectedBlendControl &&
+         context.rasterizer_mode_control ==
+             kExpectedRasterizerModeControl &&
          !context.primitive_restart_enabled &&
          context.color_attachment_count == 1 &&
          context.color_attachment_formats[0] == nrhi::Format::kR8G8B8A8_UNORM &&
@@ -120,7 +176,17 @@ CaptureBackendContract(const rex::graphics::NativeGuestDrawContext &context) {
   contract.normalized_color_mask = context.normalized_color_mask;
   contract.color_control = context.color_control;
   contract.blend_control_0 = context.blend_control_0;
+  contract.rasterizer_mode_control = context.rasterizer_mode_control;
   contract.primitive_restart_index = context.primitive_restart_index;
+  contract.rb_color_info_0 = context.render_target_state.rb_color_info_0;
+  contract.rb_depth_info = context.render_target_state.rb_depth_info;
+  contract.rb_surface_info = context.render_target_state.rb_surface_info;
+  contract.rb_modecontrol = context.render_target_state.rb_modecontrol;
+  contract.color_edram_base =
+      context.render_target_state.color_edram_base;
+  contract.depth_edram_base =
+      context.render_target_state.depth_edram_base;
+  contract.edram_mode = context.render_target_state.edram_mode;
   for (size_t attachment = 0;
        attachment < contract.color_attachment_formats.size(); ++attachment) {
     contract.color_attachment_formats[attachment] =
@@ -134,6 +200,9 @@ CaptureBackendContract(const rex::graphics::NativeGuestDrawContext &context) {
   contract.sample_count = context.sample_count;
   contract.sample_mask = context.sample_mask;
   contract.primitive_restart_enabled = context.primitive_restart_enabled;
+  contract.rasterizer_mode_control_valid =
+      context.rasterizer_mode_control_valid;
+  contract.render_target_state_valid = context.render_target_state.valid;
   contract.valid = IsExactBackendDraw(context);
   return contract;
 }
@@ -149,14 +218,33 @@ bool SameBackendContract(const Player6AEBackendContract &left,
          left.normalized_color_mask == right.normalized_color_mask &&
          left.color_control == right.color_control &&
          left.blend_control_0 == right.blend_control_0 &&
+         left.rasterizer_mode_control == right.rasterizer_mode_control &&
          left.primitive_restart_index == right.primitive_restart_index &&
+         left.rb_color_info_0 == right.rb_color_info_0 &&
+         left.rb_depth_info == right.rb_depth_info &&
+         left.rb_surface_info == right.rb_surface_info &&
+         left.rb_modecontrol == right.rb_modecontrol &&
+         left.color_edram_base == right.color_edram_base &&
+         left.depth_edram_base == right.depth_edram_base &&
+         left.edram_mode == right.edram_mode &&
          left.color_attachment_formats == right.color_attachment_formats &&
          left.color_attachment_count == right.color_attachment_count &&
          left.depth_attachment_format == right.depth_attachment_format &&
          left.stencil_attachment_format == right.stencil_attachment_format &&
          left.sample_count == right.sample_count &&
          left.sample_mask == right.sample_mask &&
+         left.rasterizer_mode_control_valid ==
+             right.rasterizer_mode_control_valid &&
+         left.render_target_state_valid ==
+             right.render_target_state_valid &&
          left.primitive_restart_enabled == right.primitive_restart_enabled;
+}
+
+bool TitleMatchesBackend(const TitleToken &candidate,
+                         const BackendEvent &event) {
+  return candidate.identity == event.identity && event.contract.valid &&
+         event.contract.vertex_shader_hash == kVertexShaderHash &&
+         event.contract.pixel_shader_hash == kPixelShaderHash;
 }
 
 FrameLedger &EnsureFrameLocked(uint64_t sequence) {
@@ -186,9 +274,6 @@ void PublishFrameLocked(FrameLedger &ledger) {
   published->title_candidate_count =
       static_cast<uint32_t>(ledger.selected_token_indices.size());
   published->dropped_draw_count = ledger.dropped_draw_count;
-  published->guest_read_failures = ledger.guest_read_failures;
-  published->payload_copy_failures = ledger.payload_copy_failures;
-  published->texture_capture_failures = ledger.texture_capture_failures;
   published->backend_tile_blocks_matched = ledger.backend_tile_blocks_matched;
   published->backend_sequence_mismatches = ledger.backend_sequence_mismatches;
   published->draws.reserve(ledger.selected_token_indices.size());
@@ -200,6 +285,13 @@ void PublishFrameLocked(FrameLedger &ledger) {
       continue;
     }
     const TitleToken &token = ledger.tokens[selected];
+    published->guest_read_failures += token.guest_read_failures;
+    published->payload_copy_failures += token.payload_copy_failures;
+    published->texture_capture_failures += token.texture_capture_failures;
+    published->sampler_contract_failures +=
+        token.sampler_contract_failures;
+    published->shared_resource_capture_failures +=
+        token.shared_resource_capture_failures;
     if (token.snapshot == nullptr ||
         index >= ledger.first_block_contracts.size()) {
       continue;
@@ -227,7 +319,9 @@ void PublishFrameLocked(FrameLedger &ledger) {
       REXLOG_INFO("Table Tennis 6AE player observer: frame={} draws={} "
                   "backend_tile_blocks=3 vf95={:08X}/{} stride=36 indices={} "
                   "vf92={:08X}/{} palette_records={} referenced_records={} "
-                  "material_textures=3 texture_bindings=6 observer_only=true "
+                  "material_textures=3 shared_textures=3 "
+                  "sampler_fetch_slots=6 texture_fetch_slots=6 "
+                  "observer_only=true "
                   "guest_suppressed=false",
                   g_published_frame->sequence, g_published_frame->draws.size(),
                   first.vertices->fetch.physical_address,
@@ -244,7 +338,8 @@ void PublishFrameLocked(FrameLedger &ledger) {
       REXLOG_INFO(
           "Table Tennis 6AE player observer: rejected frame={} "
           "candidates={} admitted={} dropped={} reads={} payload_copies={} "
-          "textures={} backend_blocks={} sequence_mismatches={} "
+          "textures={} samplers={} shared_resources={} backend_blocks={} "
+          "sequence_mismatches={} "
           "observer_only=true guest_suppressed=false",
           g_published_frame->sequence, g_published_frame->title_candidate_count,
           g_published_frame->admitted_draw_count,
@@ -252,8 +347,24 @@ void PublishFrameLocked(FrameLedger &ledger) {
           g_published_frame->guest_read_failures,
           g_published_frame->payload_copy_failures,
           g_published_frame->texture_capture_failures,
+          g_published_frame->sampler_contract_failures,
+          g_published_frame->shared_resource_capture_failures,
           g_published_frame->backend_tile_blocks_matched,
           g_published_frame->backend_sequence_mismatches);
+      for (size_t selected : ledger.selected_token_indices) {
+        if (selected >= ledger.tokens.size()) {
+          continue;
+        }
+        const TitleToken &token = ledger.tokens[selected];
+        if (token.sampler_contract_failure_mask != 0) {
+          REXLOG_INFO(
+              "  6AE selected sampler variant: ordinal={} pass={:08X} "
+              "program={:08X} failure_mask={:02X} observer_only=true",
+              token.ordinal,
+              token.program.pass_descriptor, token.program.program_pair,
+              token.sampler_contract_failure_mask);
+        }
+      }
     }
   }
 }
@@ -296,28 +407,65 @@ void AnalyzeFrameLocked(FrameLedger &frame) {
     }
   }
 
+  if (draws_per_tile == 0 || draws_per_tile > frame.tokens.size()) {
+    ++frame.backend_sequence_mismatches;
+    ++g_telemetry.backend_sequence_mismatches;
+    PublishFrameLocked(frame);
+    return;
+  }
+
+  std::vector<size_t> earliest(draws_per_tile);
   size_t search_index = 0;
-  frame.selected_token_indices.reserve(draws_per_tile);
-  frame.first_block_contracts.reserve(draws_per_tile);
   for (size_t draw = 0; draw < draws_per_tile; ++draw) {
     const BackendEvent &event = frame.backend_events[draw];
-    size_t selected = frame.tokens.size();
-    for (size_t candidate = search_index; candidate < frame.tokens.size();
-         ++candidate) {
-      if (frame.tokens[candidate].identity == event.identity) {
-        selected = candidate;
-        break;
-      }
-    }
-    if (selected == frame.tokens.size()) {
+    const auto found = std::find_if(
+        frame.tokens.begin() + static_cast<std::ptrdiff_t>(search_index),
+        frame.tokens.end(),
+        [&](const TitleToken &candidate) {
+          return TitleMatchesBackend(candidate, event);
+        });
+    if (found == frame.tokens.end()) {
       ++frame.backend_sequence_mismatches;
       ++g_telemetry.backend_sequence_mismatches;
       PublishFrameLocked(frame);
       return;
     }
-    search_index = selected + 1;
-    frame.selected_token_indices.push_back(selected);
-    frame.first_block_contracts.push_back(event.contract);
+    earliest[draw] = static_cast<size_t>(found - frame.tokens.begin());
+    search_index = earliest[draw] + 1;
+  }
+
+  std::vector<size_t> latest(draws_per_tile);
+  search_index = frame.tokens.size();
+  for (size_t draw = draws_per_tile; draw-- > 0;) {
+    const BackendEvent &event = frame.backend_events[draw];
+    bool matched = false;
+    while (search_index != 0) {
+      --search_index;
+      if (TitleMatchesBackend(frame.tokens[search_index], event)) {
+        latest[draw] = search_index;
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) {
+      ++frame.backend_sequence_mismatches;
+      ++g_telemetry.backend_sequence_mismatches;
+      PublishFrameLocked(frame);
+      return;
+    }
+  }
+  if (earliest != latest) {
+    ++frame.backend_sequence_mismatches;
+    ++g_telemetry.backend_sequence_mismatches;
+    PublishFrameLocked(frame);
+    return;
+  }
+
+  frame.selected_token_indices = std::move(earliest);
+  frame.first_block_contracts.reserve(draws_per_tile);
+  for (size_t draw = 0; draw < draws_per_tile; ++draw) {
+    frame.first_block_contracts.push_back(
+        frame.backend_events[draw].contract);
   }
   frame.backend_tile_blocks_matched = kRequiredTileBlockCount;
   g_telemetry.backend_tile_blocks_matched += kRequiredTileBlockCount;
@@ -394,6 +542,13 @@ void ObservePlayer6AECatalogDraw(uint8_t *guest_base,
   frame.guest_read_failures += capture.guest_read_failures;
   frame.payload_copy_failures += capture.payload_copy_failures;
   frame.texture_capture_failures += capture.texture_capture_failures;
+  frame.sampler_contract_failures += capture.sampler_contract_failures;
+  frame.shared_resource_capture_failures +=
+      capture.shared_resource_capture_failures;
+  g_telemetry.sampler_contract_failures +=
+      capture.sampler_contract_failures;
+  g_telemetry.shared_resource_capture_failures +=
+      capture.shared_resource_capture_failures;
   if (frame.tokens.size() == kMaximumTitleDraws) {
     ++frame.dropped_draw_count;
     return;
@@ -402,6 +557,15 @@ void ObservePlayer6AECatalogDraw(uint8_t *guest_base,
       .identity = capture.identity,
       .program = draw.pass,
       .snapshot = std::move(capture.snapshot),
+      .ordinal = draw.ordinal,
+      .guest_read_failures = capture.guest_read_failures,
+      .payload_copy_failures = capture.payload_copy_failures,
+      .texture_capture_failures = capture.texture_capture_failures,
+      .sampler_contract_failures = capture.sampler_contract_failures,
+      .sampler_contract_failure_mask =
+          capture.sampler_contract_failure_mask,
+      .shared_resource_capture_failures =
+          capture.shared_resource_capture_failures,
   });
   g_telemetry.admitted_draws += frame.tokens.back().snapshot != nullptr;
 }
@@ -426,6 +590,11 @@ void ObservePlayer6AEBackendDraw(
                 .primitive_type = context.primitive_type,
                 .submitted_index_count = context.guest_vertex_or_index_count,
                 .guest_index_base = context.guest_index_base,
+                .guest_vertex_base =
+                    context.primary_vertex_fetch.physical_address,
+                .guest_vertex_bytes =
+                    context.primary_vertex_fetch.byte_count,
+                .guest_vertex_endian = context.primary_vertex_fetch.endian,
             },
         .contract = CaptureBackendContract(context),
     };
@@ -473,7 +642,8 @@ void Player6AEObserverFrameEnd() {
 
 bool Player6AEObserverEnabled() {
   return REXCVAR_GET(tabletennis_native_6ae_player_observer) ||
-         NativeFrameSceneCaptureEnabled();
+         NativeFrameSceneFullCaptureEnabled() ||
+         Player6AEObserverOverlayEnabled();
 }
 
 std::shared_ptr<const Player6AEFrameSnapshot> LatestPlayer6AEFrameSnapshot() {

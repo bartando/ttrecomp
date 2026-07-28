@@ -5,14 +5,18 @@
 #include "native/tabletennis_crowd_observer.h"
 #include "native/tabletennis_crowd_replacement_prewarm.h"
 #include "native/tabletennis_d47_player_observer.h"
+#include "native/tabletennis_hud_swf_backend_observer.h"
 #include "native/tabletennis_main_coverage_ledger.h"
 #include "native/tabletennis_net_bb903_observer.h"
+#include "native/tabletennis_phase0_rectangle_replay.h"
 #include "native/tabletennis_player_palette_write_observer.h"
+#include "native/tabletennis_player_a406_observer.h"
 #include "native/tabletennis_player_2ac_observer.h"
 #include "native/tabletennis_player_replacement_candidates.h"
 #include "native/tabletennis_venue_diagnostic_suppression.h"
 #include "native/tabletennis_venue_14d_observer.h"
 #include "native/tabletennis_venue_526a_observer.h"
+#include "native/tabletennis_venue_9e_observer.h"
 #include "native/tabletennis_venue_e33_observer.h"
 #include "native/tabletennis_venue_observer_renderer.h"
 
@@ -73,10 +77,13 @@ bool DrawReplacerDispatcher::Match(
   ObservePlayer2ACBackendDraw(context);
   ObservePlayer6AEBackendDraw(context);
   ObserveD47PlayerBackendDraw(context);
+  ObservePlayerA406BackendDraw(context);
   ObserveVenue14DBackendDraw(context);
   ObserveVenue526ABackendDraw(context);
+  ObserveVenue9EBackendDraw(context);
   ObserveVenueE33BackendDraw(context);
   ObserveNetBB903BackendDraw(context);
+  ObserveHudSwfBackendDraw(context);
 
   // Observer-only CA9 player proof. Keep this before route selection: placing
   // it inside the lowest-priority player matcher allowed an earlier route to
@@ -88,6 +95,7 @@ bool DrawReplacerDispatcher::Match(
   // frame N+1 closes N, so this ordering lets any family publish its delayed
   // proof for N before the coverage ledger records that closing sequence.
   ObserveMainCoverageBackendDraw(context);
+  ObservePhase0RectangleDraw(context);
 
   // A backend may abandon a successful match if it cannot borrow the guest
   // render scope. Never let that stale route claim a later renderer call.

@@ -13,14 +13,23 @@ namespace tabletennis::native {
 
 struct SceneCatalogDrawOccurrence;
 
+inline constexpr uint32_t kVenueE33VertexStride = 32;
+inline constexpr uint32_t kVenueE33VertexEndian = 2;
+
 struct VenueE33DrawIdentity {
   uint32_t primitive_type = 0;
   uint32_t submitted_index_count = 0;
   uint32_t guest_index_base = 0;
+  uint32_t guest_vertex_base = 0;
+  uint32_t guest_vertex_bytes = 0;
+  uint32_t guest_vertex_endian = 0;
 
   bool valid() const {
     return primitive_type != 0 && submitted_index_count != 0 &&
-           guest_index_base != 0;
+           guest_index_base != 0 && guest_vertex_base != 0 &&
+           guest_vertex_bytes >= kVenueE33VertexStride &&
+           guest_vertex_bytes % kVenueE33VertexStride == 0 &&
+           guest_vertex_endian == kVenueE33VertexEndian;
   }
   bool operator==(const VenueE33DrawIdentity &) const = default;
 };
@@ -81,8 +90,8 @@ struct VenueE33TitleCandidate {
 // Raw immutable copies are deliberate. The vertex layout is trace-proven,
 // while decode and native rendering remain outside this observer-only module.
 struct VenueE33VertexPayload {
-  static constexpr uint32_t kStride = 32;
-  static constexpr uint32_t kEndian8In32 = 2;
+  static constexpr uint32_t kStride = kVenueE33VertexStride;
+  static constexpr uint32_t kEndian8In32 = kVenueE33VertexEndian;
 
   uint32_t source_virtual_alias = 0;
   uint32_t physical_address = 0;

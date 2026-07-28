@@ -47,6 +47,10 @@ struct NativeSceneCompositionReadiness {
   uint32_t venue_14d_draw_count = 0;
   uint32_t crowd_c6_draw_count = 0;
   uint32_t player_ca9_draw_count = 0;
+  NativeSceneDrawFamily failed_family =
+      NativeSceneDrawFamily::kVenuePs328;
+  uint32_t failed_family_draw_index = 0;
+  uint32_t failed_ordinal = 0;
   NativeSceneCompositionRejectReason reject_reason =
       NativeSceneCompositionRejectReason::kMissingScene;
   bool gameplay_active = false;

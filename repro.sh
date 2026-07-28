@@ -31,6 +31,9 @@ PLAY_RALLY=false
 NATIVE_TAKEOVER=false
 TEST_PATH=false
 extra=()
+# Keep automated renderer runs silent without replacing the title's audio
+# clock or XMA services, both of which may participate in game timing.
+extra+=(--audio_mute=true)
 for arg in "$@"; do
   if [[ "$arg" == "--capture-trace" ]]; then
     CAPTURE_TRACE=true
@@ -68,12 +71,12 @@ if $TEST_PATH; then
   # The title-side test path owns its state-aware Start/Continue traversal.
   # The host harness sends no menu input and waits until render capture proves
   # that both match players are live.
-  # A cold or newly-recovered pipeline cache cannot make progress if incomplete
-  # async pipelines cause every frame to be discarded. Present the placeholder
-  # while RexGlue compiles them; the verified gameplay marker and post-wait keep
-  # the screenshot deterministic once the real pipelines are ready.
+  # MoltenVK can leave an async placeholder pipeline resident indefinitely,
+  # presenting a solid-magenta frame while the guest keeps running. Test runs
+  # need deterministic real frames more than background compilation, so build
+  # missing pipelines synchronously on this path.
   extra+=(--tabletennis_test_path=true
-          --vulkan_async_skip_incomplete_frames=false)
+          --async_shader_compilation=false)
   if $CAPTURE_TRACE || $CAPTURE_GAMEPLAY_TRACE; then
     extra+=(--tabletennis_test_capture_gameplay_trace=true)
   fi
@@ -92,12 +95,58 @@ marker_count(){
 }
 CHARACTER_MARKERS_BEFORE=$(marker_count "Table Tennis character select detected")
 GAMEPLAY_MARKERS_BEFORE=$(marker_count "Table Tennis gameplay detected")
+QUIESCE_MARKERS_BEFORE=$(marker_count \
+  "Table Tennis PS328 title capture retired")
+CAPTURE_POST_QUIESCE_SAMPLE=${TT_CAPTURE_POST_QUIESCE_SAMPLE:-true}
+POST_QUIESCE_SAMPLE_DELAY=${TT_POST_QUIESCE_SAMPLE_DELAY:-1}
+POST_QUIESCE_SAMPLE_SECONDS=${TT_POST_QUIESCE_SAMPLE_SECONDS:-5}
+POST_QUIESCE_SAMPLE_FILE=${TT_POST_QUIESCE_SAMPLE_FILE:-${LOG%.log}_sample.txt}
+POST_QUIESCE_PROGRESS_FILE=${TT_POST_QUIESCE_PROGRESS_FILE:-${LOG%.log}_progress.txt}
+STALL_MONITOR_PID=0
 
 pkill -f "macos-arm64-relwithdebinfo/tabletennis" 2>/dev/null || true
 sleep 1
 
 "$ROOT/run.sh" --log_level=info --log_file="$LOG" "${extra[@]}" >"$STDOUT_LOG" 2>&1 &
 GAME_PID=$!
+
+record_stall_progress(){
+  local phase="$1"
+  {
+    echo "phase=$phase time=$(date -u +%Y-%m-%dT%H:%M:%SZ) pid=$GAME_PID"
+    ps -p "$GAME_PID" -o pid=,ppid=,state=,%cpu=,%mem=,etime=,command= \
+      2>/dev/null || true
+    rg "Table Tennis guest performance:" "$LOG" 2>/dev/null | tail -n 1 || true
+    rg "post-quiesce guest swap|post-quiesce native output|private batch replay|private translated replay readback" \
+      "$LOG" 2>/dev/null | tail -n 12 || true
+  } >>"$POST_QUIESCE_PROGRESS_FILE"
+}
+
+monitor_post_quiesce_stall(){
+  while kill -0 "$GAME_PID" 2>/dev/null; do
+    if (( $(marker_count \
+          "Table Tennis PS328 title capture retired") >
+          QUIESCE_MARKERS_BEFORE )); then
+      sleep "$POST_QUIESCE_SAMPLE_DELAY"
+      kill -0 "$GAME_PID" 2>/dev/null || return
+      : >"$POST_QUIESCE_PROGRESS_FILE"
+      record_stall_progress before_sample
+      /usr/bin/sample "$GAME_PID" "$POST_QUIESCE_SAMPLE_SECONDS" 1 \
+        -file "$POST_QUIESCE_SAMPLE_FILE" \
+        >>"$POST_QUIESCE_PROGRESS_FILE" 2>&1 || true
+      record_stall_progress after_sample
+      echo "post-quiesce process sample -> $POST_QUIESCE_SAMPLE_FILE"
+      echo "post-quiesce progress -> $POST_QUIESCE_PROGRESS_FILE"
+      return
+    fi
+    sleep 0.2
+  done
+}
+
+if $CAPTURE_POST_QUIESCE_SAMPLE; then
+  monitor_post_quiesce_stall &
+  STALL_MONITOR_PID=$!
+fi
 
 for i in {1..45}; do
   osascript -e "tell application \"System Events\" to exists first process whose unix id is $GAME_PID" 2>/dev/null | grep -q true && break
@@ -134,6 +183,30 @@ stop_game(){
   done
   kill -KILL "$GAME_PID" 2>/dev/null || true
   wait "$GAME_PID" 2>/dev/null || true
+}
+
+wait_for_post_quiesce_sample(){
+  if (( STALL_MONITOR_PID == 0 )) ||
+      ! kill -0 "$STALL_MONITOR_PID" 2>/dev/null; then
+    return
+  fi
+  if (( $(marker_count \
+        "Table Tennis PS328 title capture retired") <=
+        QUIESCE_MARKERS_BEFORE )); then
+    return
+  fi
+  local tenths=$(( (POST_QUIESCE_SAMPLE_DELAY +
+                    POST_QUIESCE_SAMPLE_SECONDS + 2) * 10 ))
+  local sample_wait_index
+  for (( sample_wait_index = 0;
+         sample_wait_index < tenths;
+         ++sample_wait_index )); do
+    if ! kill -0 "$STALL_MONITOR_PID" 2>/dev/null; then
+      wait "$STALL_MONITOR_PID" 2>/dev/null || true
+      return
+    fi
+    sleep 0.1
+  done
 }
 
 capture(){
@@ -233,6 +306,7 @@ if $TEST_PATH; then
   sleep 1
   $PY "$ROOT/tools/shotwindow.py" "$checkpoint" tabletennis "$GAME_PID" >/dev/null 2>&1 || true
   echo "gameplay final -> $checkpoint"
+  wait_for_post_quiesce_sample
   stop_game
   exit 0
 fi
@@ -327,11 +401,25 @@ if $reached_character_select; then
           echo "captured gameplay GPU frame -> $traces[1]"
         fi
         for rally_input in {1..40}; do
+          if ! kill -0 "$GAME_PID" 2>/dev/null; then
+            echo "FAILED: game process exited during gameplay rally" >&2
+            wait "$GAME_PID" 2>/dev/null || true
+            exit 1
+          fi
           k space 0.5
         done
       fi
+      if ! kill -0 "$GAME_PID" 2>/dev/null; then
+        echo "FAILED: game process exited before gameplay evidence capture" >&2
+        wait "$GAME_PID" 2>/dev/null || true
+        exit 1
+      fi
       checkpoint="${SHOT%.png}_gameplay_final.png"
-      $PY "$ROOT/tools/shotwindow.py" "$checkpoint" tabletennis "$GAME_PID" >/dev/null 2>&1 || true
+      if ! $PY "$ROOT/tools/shotwindow.py" "$checkpoint" tabletennis "$GAME_PID" >/dev/null 2>&1; then
+        echo "FAILED: could not capture live gameplay window" >&2
+        stop_game
+        exit 1
+      fi
       echo "gameplay final -> $checkpoint"
     fi
     stop_game

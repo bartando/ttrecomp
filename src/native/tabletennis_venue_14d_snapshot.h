@@ -11,14 +11,41 @@ namespace tabletennis::native {
 
 struct SceneCatalogDrawOccurrence;
 
+inline constexpr uint64_t kVenue14DPixelShaderHash =
+    0x14D6B61CBC3D853Cull;
+inline constexpr uint64_t kVenue14DVertexShader40Hash =
+    0x4EAEC701E97DCDADull;
+inline constexpr uint64_t kVenue14DVertexShader48Hash =
+    0x08D6210341AD63F6ull;
+inline constexpr uint32_t kVenue14DVertexEndian = 2;
+
+constexpr uint64_t Venue14DVertexShaderForLayout(uint32_t stride,
+                                                 uint32_t endian) {
+  if (endian != kVenue14DVertexEndian) {
+    return 0;
+  }
+  if (stride == 40) {
+    return kVenue14DVertexShader40Hash;
+  }
+  if (stride == 48) {
+    return kVenue14DVertexShader48Hash;
+  }
+  return 0;
+}
+
 struct Venue14DDrawIdentity {
   uint32_t primitive_type = 0;
   uint32_t submitted_index_count = 0;
   uint32_t guest_index_base = 0;
+  uint32_t guest_vertex_base = 0;
+  uint32_t guest_vertex_bytes = 0;
+  uint32_t guest_vertex_endian = 0;
 
   bool valid() const {
     return primitive_type != 0 && submitted_index_count != 0 &&
-           guest_index_base != 0;
+           guest_index_base != 0 && guest_vertex_base != 0 &&
+           guest_vertex_bytes != 0 &&
+           guest_vertex_endian == kVenue14DVertexEndian;
   }
   bool operator==(const Venue14DDrawIdentity&) const = default;
 };

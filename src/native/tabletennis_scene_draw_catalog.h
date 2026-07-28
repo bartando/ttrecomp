@@ -78,6 +78,8 @@ struct SceneCatalogDrawState {
   std::array<float, 16> vertex_constants_12_15{};
   std::array<float, 4> pixel_constant_20{};
   std::array<float, 4> pixel_constant_46{};
+  std::array<float, 4> pixel_constant_254{};
+  std::array<float, 4> pixel_constant_255{};
   uint32_t guest_read_failures = 0;
   bool valid = false;
 };

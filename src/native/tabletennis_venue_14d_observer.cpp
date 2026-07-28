@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <limits>
@@ -29,18 +30,21 @@ namespace {
 
 namespace nrhi = rex::graphics::nrhi;
 
-constexpr uint64_t kPixelShaderHash = 0x14D6B61CBC3D853Cull;
 constexpr std::array<uint64_t, 2> kVertexShaderHashes = {
-    0x4EAEC701E97DCDADull,
-    0x08D6210341AD63F6ull,
+    kVenue14DVertexShader40Hash,
+    kVenue14DVertexShader48Hash,
 };
 constexpr uint32_t kGameplayRenderPassKey = 0x0000000E;
 constexpr uint32_t kGameplaySurfacePitch = 1280;
+constexpr uint32_t kMainColorEdramBase = 0x400;
+constexpr uint32_t kMainDepthEdramBase = 0;
+constexpr uint32_t kMainEdramMode = 4;
 constexpr uint32_t kTriangleStripPrimitive = 6;
 constexpr uint32_t kRequiredTileBlockCount = 3;
 constexpr size_t kMaximumTitleCandidates = 128;
 constexpr size_t kMaximumRetainedFrames = 8;
 constexpr size_t kMaximumQueuedBackendEvents = 4096;
+constexpr uint64_t kValidFrameLogInterval = 120;
 
 struct TitleToken {
   Venue14DDrawIdentity identity{};
@@ -82,10 +86,37 @@ std::shared_ptr<const Venue14DFrameSnapshot> g_published_frame;
 Venue14DObserverTelemetry g_telemetry;
 bool g_announced_rejection = false;
 bool g_announced_mismatch = false;
+uint64_t g_valid_frame_success_logs_suppressed = 0;
 
 bool IsTargetVertexShader(uint64_t hash) {
   return std::ranges::find(kVertexShaderHashes, hash) !=
          kVertexShaderHashes.end();
+}
+
+bool RawTargetStateMatchesDecoded(
+    const rex::graphics::NativeGuestDrawContext::RenderTargetState &state) {
+  constexpr uint32_t kEdramBaseMask = (1u << 12) - 1;
+  constexpr uint32_t kSurfacePitchMask = (1u << 14) - 1;
+  constexpr uint32_t kEdramModeMask = (1u << 3) - 1;
+  return state.valid &&
+         (state.rb_color_info_0 & kEdramBaseMask) ==
+             state.color_edram_base &&
+         (state.rb_depth_info & kEdramBaseMask) ==
+             state.depth_edram_base &&
+         (state.rb_surface_info & kSurfacePitchMask) ==
+             state.surface_pitch &&
+         (state.rb_modecontrol & kEdramModeMask) == state.edram_mode;
+}
+
+bool IsExactMainTarget(
+    const rex::graphics::NativeGuestDrawContext &context) {
+  const auto &target = context.render_target_state;
+  return RawTargetStateMatchesDecoded(target) &&
+         target.color_edram_base == kMainColorEdramBase &&
+         target.depth_edram_base == kMainDepthEdramBase &&
+         target.surface_pitch == kGameplaySurfacePitch &&
+         target.edram_mode == kMainEdramMode &&
+         context.surface_pitch == target.surface_pitch;
 }
 
 bool SupportedDepthFormat(nrhi::Format format) {
@@ -93,17 +124,36 @@ bool SupportedDepthFormat(nrhi::Format format) {
          format == nrhi::Format::kD32_FLOAT_S8_UINT;
 }
 
+bool BackendVertexFetchMatchesShader(
+    const rex::graphics::NativeGuestDrawContext &context) {
+  if (!context.primary_vertex_fetch.valid ||
+      context.primary_vertex_fetch.endian != kVenue14DVertexEndian) {
+    return false;
+  }
+  uint32_t stride = 0;
+  if (context.vertex_shader_hash == kVenue14DVertexShader40Hash) {
+    stride = 40;
+  } else if (context.vertex_shader_hash == kVenue14DVertexShader48Hash) {
+    stride = 48;
+  } else {
+    return false;
+  }
+  return context.primary_vertex_fetch.byte_count >= stride &&
+         context.primary_vertex_fetch.byte_count % stride == 0;
+}
+
 bool IsExactBackendDraw(const rex::graphics::NativeGuestDrawContext &context) {
   return context.backend == rex::graphics::NativeGuestOutputBackend::kVulkan &&
          context.render_pass_key_valid &&
          context.render_pass_key == kGameplayRenderPassKey &&
-         context.surface_pitch == kGameplaySurfacePitch && context.indexed &&
+         IsExactMainTarget(context) && context.indexed &&
          context.guest_index_base_valid && context.guest_index_base != 0 &&
+         BackendVertexFetchMatchesShader(context) &&
          context.draw_state_contract_valid &&
          context.rasterizer_mode_control_valid &&
          context.borrowed_attachment_contract_valid &&
          IsTargetVertexShader(context.vertex_shader_hash) &&
-         context.pixel_shader_hash == kPixelShaderHash &&
+         context.pixel_shader_hash == kVenue14DPixelShaderHash &&
          context.primitive_type == kTriangleStripPrimitive &&
          context.guest_vertex_or_index_count != 0 &&
          !context.primitive_restart_enabled &&
@@ -128,6 +178,15 @@ CaptureBackendContract(const rex::graphics::NativeGuestDrawContext &context) {
   contract.blend_control_0 = context.blend_control_0;
   contract.rasterizer_mode_control = context.rasterizer_mode_control;
   contract.primitive_restart_index = context.primitive_restart_index;
+  contract.rb_color_info_0 = context.render_target_state.rb_color_info_0;
+  contract.rb_depth_info = context.render_target_state.rb_depth_info;
+  contract.rb_surface_info = context.render_target_state.rb_surface_info;
+  contract.rb_modecontrol = context.render_target_state.rb_modecontrol;
+  contract.color_edram_base =
+      context.render_target_state.color_edram_base;
+  contract.depth_edram_base =
+      context.render_target_state.depth_edram_base;
+  contract.edram_mode = context.render_target_state.edram_mode;
   for (size_t attachment = 0;
        attachment < contract.color_attachment_formats.size(); ++attachment) {
     contract.color_attachment_formats[attachment] =
@@ -143,6 +202,7 @@ CaptureBackendContract(const rex::graphics::NativeGuestDrawContext &context) {
   contract.primitive_restart_enabled = context.primitive_restart_enabled;
   contract.rasterizer_mode_control_valid =
       context.rasterizer_mode_control_valid;
+  contract.render_target_state_valid = context.render_target_state.valid;
   contract.valid = IsExactBackendDraw(context);
   return contract;
 }
@@ -160,6 +220,13 @@ bool SameBackendContract(const Venue14DBackendContract &left,
          left.blend_control_0 == right.blend_control_0 &&
          left.rasterizer_mode_control == right.rasterizer_mode_control &&
          left.primitive_restart_index == right.primitive_restart_index &&
+         left.rb_color_info_0 == right.rb_color_info_0 &&
+         left.rb_depth_info == right.rb_depth_info &&
+         left.rb_surface_info == right.rb_surface_info &&
+         left.rb_modecontrol == right.rb_modecontrol &&
+         left.color_edram_base == right.color_edram_base &&
+         left.depth_edram_base == right.depth_edram_base &&
+         left.edram_mode == right.edram_mode &&
          left.color_attachment_formats == right.color_attachment_formats &&
          left.color_attachment_count == right.color_attachment_count &&
          left.depth_attachment_format == right.depth_attachment_format &&
@@ -168,6 +235,8 @@ bool SameBackendContract(const Venue14DBackendContract &left,
          left.sample_mask == right.sample_mask &&
          left.rasterizer_mode_control_valid ==
              right.rasterizer_mode_control_valid &&
+         left.render_target_state_valid ==
+             right.render_target_state_valid &&
          left.primitive_restart_enabled == right.primitive_restart_enabled;
 }
 
@@ -211,6 +280,8 @@ void PublishFrameLocked(FrameLedger &frame) {
     published->texture_capture_failures += candidate.texture_capture_failures;
     published->draws.push_back({
         .title = candidate.snapshot,
+        .backend_identity =
+            frame.backend_events[index].identity,
         .backend = frame.first_block_contracts[index],
     });
   }
@@ -233,20 +304,30 @@ void PublishFrameLocked(FrameLedger &frame) {
         rasterizer_modes.push_back(draw.backend.rasterizer_mode_control);
       }
     }
-    REXLOG_INFO("Table Tennis 14D venue observer: frame={} candidates={} "
-                "matched={} unmatched_title={} indices={} "
-                "backend_events={} backend_tile_blocks=3 "
-                "raster={:08X}/{} unique_raster={} "
-                "textures_per_draw=5 full_constant_banks=true "
-                "observer_only=true guest_suppressed=false",
-                g_published_frame->sequence,
-                g_published_frame->title_candidate_count,
-                g_published_frame->matched_draw_count,
-                g_published_frame->unmatched_title_candidate_count,
-                g_published_frame->matched_index_count,
-                g_published_frame->backend_event_count,
-                rasterizer_modes.empty() ? 0 : rasterizer_modes.front(),
-                rasterizer_modes_valid, rasterizer_modes.size());
+    const bool log_valid_frame =
+        g_telemetry.valid_frames == 1 ||
+        (g_telemetry.valid_frames % kValidFrameLogInterval) == 0;
+    if (log_valid_frame) {
+      REXLOG_INFO(
+          "Table Tennis 14D venue observer: frame={} valid_milestone={} "
+          "suppressed_success_logs={} candidates={} matched={} "
+          "unmatched_title={} indices={} backend_events={} "
+          "backend_tile_blocks=3 raster={:08X}/{} unique_raster={} "
+          "textures_per_draw=5 full_constant_banks=true "
+          "observer_only=true guest_suppressed=false",
+          g_published_frame->sequence, g_telemetry.valid_frames,
+          g_valid_frame_success_logs_suppressed,
+          g_published_frame->title_candidate_count,
+          g_published_frame->matched_draw_count,
+          g_published_frame->unmatched_title_candidate_count,
+          g_published_frame->matched_index_count,
+          g_published_frame->backend_event_count,
+          rasterizer_modes.empty() ? 0 : rasterizer_modes.front(),
+          rasterizer_modes_valid, rasterizer_modes.size());
+      g_valid_frame_success_logs_suppressed = 0;
+    } else {
+      ++g_valid_frame_success_logs_suppressed;
+    }
     return;
   }
 
@@ -290,8 +371,10 @@ void AnnounceAnalysisMismatch(const FrameLedger &frame, const char *reason,
   REXLOG_INFO("Table Tennis 14D venue observer: frame-bucket mismatch "
               "title_frame={} backend_frame={} reason={} event={} "
               "backend_events={} title_candidates={} "
-              "expected[primitive={} indices={} base={:08X}] "
-              "observed[primitive={} indices={} base={:08X}] "
+              "expected[primitive={} indices={} ib={:08X} "
+              "vb={:08X}/{} endian={}] "
+              "observed[primitive={} indices={} ib={:08X} "
+              "vb={:08X}/{} endian={}] "
               "observer_only=true",
               frame.sequence, observed_event.backend_frame_sequence, reason,
               event_index, frame.backend_events.size(),
@@ -299,9 +382,27 @@ void AnnounceAnalysisMismatch(const FrameLedger &frame, const char *reason,
               expected_event.identity.primitive_type,
               expected_event.identity.submitted_index_count,
               expected_event.identity.guest_index_base,
+              expected_event.identity.guest_vertex_base,
+              expected_event.identity.guest_vertex_bytes,
+              expected_event.identity.guest_vertex_endian,
               observed_event.identity.primitive_type,
               observed_event.identity.submitted_index_count,
-              observed_event.identity.guest_index_base);
+              observed_event.identity.guest_index_base,
+              observed_event.identity.guest_vertex_base,
+              observed_event.identity.guest_vertex_bytes,
+              observed_event.identity.guest_vertex_endian);
+}
+
+bool TitleMatchesBackend(const TitleToken &candidate,
+                         const BackendEvent &event) {
+  return candidate.snapshot != nullptr && candidate.snapshot->valid &&
+         candidate.snapshot->vertices != nullptr &&
+         candidate.identity == event.identity && event.contract.valid &&
+         event.contract.vertex_shader_hash ==
+             Venue14DVertexShaderForLayout(
+                 candidate.snapshot->vertices->stride,
+                 candidate.snapshot->vertices->endian) &&
+         event.contract.pixel_shader_hash == kVenue14DPixelShaderHash;
 }
 
 void AnalyzeFrameLocked(FrameLedger &frame) {
@@ -343,18 +444,16 @@ void AnalyzeFrameLocked(FrameLedger &frame) {
     }
   }
 
-  std::vector<uint8_t> candidate_used(frame.title.candidates.size(),
-                                      uint8_t{0});
-  frame.selected_candidate_indices.reserve(draws_per_tile);
-  frame.first_block_contracts.reserve(draws_per_tile);
+  std::vector<size_t> earliest(draws_per_tile);
+  size_t candidate_cursor = 0;
   for (size_t draw = 0; draw < draws_per_tile; ++draw) {
     const BackendEvent &event = frame.backend_events[draw];
-    const auto found = std::ranges::find_if(
-        frame.title.candidates, [&](const TitleToken &candidate) {
-          const size_t index =
-              static_cast<size_t>(&candidate - frame.title.candidates.data());
-          return candidate_used[index] == 0 &&
-                 candidate.identity == event.identity;
+    const auto found = std::find_if(
+        frame.title.candidates.begin() +
+            static_cast<std::ptrdiff_t>(candidate_cursor),
+        frame.title.candidates.end(),
+        [&](const TitleToken &candidate) {
+          return TitleMatchesBackend(candidate, event);
         });
     if (found == frame.title.candidates.end()) {
       AnnounceAnalysisMismatch(frame, "backend-title-join", draw, nullptr,
@@ -363,10 +462,45 @@ void AnalyzeFrameLocked(FrameLedger &frame) {
       PublishFrameLocked(frame);
       return;
     }
-    const size_t candidate_index =
+    earliest[draw] =
         static_cast<size_t>(found - frame.title.candidates.begin());
-    candidate_used[candidate_index] = 1;
-    frame.selected_candidate_indices.push_back(candidate_index);
+    candidate_cursor = earliest[draw] + 1;
+  }
+
+  std::vector<size_t> latest(draws_per_tile);
+  candidate_cursor = frame.title.candidates.size();
+  for (size_t draw = draws_per_tile; draw-- > 0;) {
+    const BackendEvent &event = frame.backend_events[draw];
+    bool matched = false;
+    while (candidate_cursor != 0) {
+      --candidate_cursor;
+      if (TitleMatchesBackend(frame.title.candidates[candidate_cursor],
+                              event)) {
+        latest[draw] = candidate_cursor;
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) {
+      AnnounceAnalysisMismatch(frame, "backend-title-reverse-join", draw,
+                               nullptr, &event);
+      RecordMismatch(frame);
+      PublishFrameLocked(frame);
+      return;
+    }
+  }
+  if (earliest != latest) {
+    AnnounceAnalysisMismatch(frame, "backend-title-ambiguous", 0, nullptr,
+                             &frame.backend_events.front());
+    RecordMismatch(frame);
+    PublishFrameLocked(frame);
+    return;
+  }
+
+  frame.selected_candidate_indices = std::move(earliest);
+  frame.first_block_contracts.reserve(draws_per_tile);
+  for (size_t draw = 0; draw < draws_per_tile; ++draw) {
+    const BackendEvent &event = frame.backend_events[draw];
     frame.first_block_contracts.push_back(event.contract);
     frame.matched_index_count += event.identity.submitted_index_count;
   }
@@ -478,7 +612,8 @@ void ObserveVenue14DBackendDraw(
   if (!Venue14DObserverEnabled()) {
     return;
   }
-  const bool pixel_hash_matches = context.pixel_shader_hash == kPixelShaderHash;
+  const bool pixel_hash_matches =
+      context.pixel_shader_hash == kVenue14DPixelShaderHash;
   const bool shader_pair_matches =
       pixel_hash_matches && IsTargetVertexShader(context.vertex_shader_hash);
   const bool exact_backend_draw = IsExactBackendDraw(context);
@@ -497,6 +632,11 @@ void ObserveVenue14DBackendDraw(
                 .primitive_type = context.primitive_type,
                 .submitted_index_count = context.guest_vertex_or_index_count,
                 .guest_index_base = context.guest_index_base,
+                .guest_vertex_base =
+                    context.primary_vertex_fetch.physical_address,
+                .guest_vertex_bytes =
+                    context.primary_vertex_fetch.byte_count,
+                .guest_vertex_endian = context.primary_vertex_fetch.endian,
             },
         .contract = CaptureBackendContract(context),
     };

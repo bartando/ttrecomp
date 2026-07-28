@@ -8,12 +8,13 @@ render, replace, suppress, or authorize takeover.
 
 For each authoritative backend frame sequence, the ledger:
 
-1. collects only late translated-backend callbacks for MAIN render-pass key
-   `0xE`;
+1. collects only late translated-backend callbacks whose raw Xenos target
+   registers prove the MAIN target identity;
 2. retains value-only draw identity:
    `{primitive, guest-submitted index count, physical index base}`;
-3. retains shader hashes and the complete available attachment, depth, blend,
-   raster, restart, sample-count, and sample-mask contract;
+3. retains shader hashes, raw target registers, their decoded EDRAM identity,
+   and the complete available attachment, depth, blend, raster, restart,
+   sample-count, and sample-mask contract;
 4. retains every phase of the largest contiguous `A,A,A` sequence in the
    backend stream;
 5. requires those three non-empty tile blocks to repeat observable identities,
@@ -49,8 +50,85 @@ interleaved backend-only offsets exist. Backend-only callbacks never become
 title ordinals, never increase the logical draw count, and are never counted
 as covered.
 
+## Auto-indexed MAIN prefix rectangle
+
+The persistent callback immediately before the three-tile core is not an
+indexed scene draw and must not be invented as a title ordinal. Primitive `8`
+is `xenos::PrimitiveType::kRectangleList`, not a triangle list. RexGlue runs
+the three guest control vertices through the guest vertex shader, synthesizes
+the fourth corner, and submits a four-index host triangle strip. Its exact
+translated shader pair is:
+
+- VS `0A6D1DD7767FDF27`: fetches vf95 with a 28-byte stride as
+  `{float3 position, float4 color}`, writes the position directly, and exports
+  the color as interpolator 0;
+- PS `2E372EA28CC404B7`: reads interpolator 0 and exports it to color target 0.
+  It contains no texture fetch or discard.
+
+These facts come from both the guest microcode disassembly and the independently
+translated SPIR-V dump. They prove this shader pair is color-output work, not a
+barrier or no-op, but shader identity alone is not enough to classify a live
+callback.
+
+For that pair the ledger now performs a bounded, fault-guarded proof:
+
+1. require Vulkan, the exact MAIN raw/decoded target, rectangle-list primitive
+   8, exactly three guest control vertices, RexGlue's four-index host expansion,
+   auto-indexed submission, and the exact shader hashes;
+2. require the complete borrowed RGBA8/depth/stencil 4x attachment contract,
+   complete draw/raster state, and an enabled color channel;
+3. require vf95 endian 2 with at least three 28-byte records;
+4. copy only the first 84 bytes twice through `GuestTryCopy`, reject a revoked
+   or changing range, and retain an FNV-1a payload fingerprint;
+5. decode and retain the three positions plus both decoded color values and
+   their raw bits;
+6. require the exact three-corner rectangle geometry and color basis observed
+   live: `(1, 0xFFFFFFFF, 0, 0)`, `(1, 0xFFFFFFFF, 1, 0)`, and
+   `(1, 0xFFFFFFFF, 0, 1)`.
+
+`0xFFFFFFFF` is an intentional negative quiet-NaN in the green channel, not a
+bad guest read. It is preserved as bits because native replay must reproduce
+the shader and render-target conversion rather than sanitizing the value.
+For the observed 320x180 rectangle the whole 84-byte payload repeats with
+fingerprint `48F89B1D4D072A58` even as its guest physical address rotates.
+
+Only then is the event labeled `vertex_color_rectangle_output`. The proof owns
+host values only. Classification remains observer-only: it does not render,
+suppress, create a title ordinal, or make `all_backend_events_covered()` true.
+A future native MAIN transaction must serve this rectangle output explicitly.
+
 The public `MainCoverageFrameSnapshot` owns only host values and containers.
 It retains no guest pointer, guest allocation, RHI resource, or command object.
+
+## Exact guest target identity
+
+The backend render-pass cache key is retained for diagnostics and repeated-tile
+equality, but it is not a MAIN admission condition. In particular,
+`render_pass_key == 0xE` is not treated as proof of guest target identity.
+
+Every candidate retains the raw draw-point values of:
+
+- `RB_COLOR_INFO[0]`;
+- `RB_DEPTH_INFO`;
+- `RB_SURFACE_INFO`; and
+- `RB_MODECONTROL`.
+
+The backend also publishes the decoded color EDRAM base, depth EDRAM base,
+surface pitch, and EDRAM mode. Before accepting a callback, the ledger
+independently decodes the documented contiguous register fields from the raw
+values and requires them to equal the published decode. It then requires the
+trace-known MAIN signature:
+
+- color EDRAM base `0x400`;
+- depth EDRAM base `0`;
+- surface pitch `1280`; and
+- EDRAM mode `4` (`kColorDepth`).
+
+The borrowed attachment contract separately proves RGBA8 color, supported
+depth/stencil format, and 4x sampling for complete title-joined events. Missing
+raw state, a raw/decoded mismatch, or any target-signature mismatch fails
+closed. Raw values are part of the retained backend contract, so the existing
+three-tile state-equality proof also covers all non-address target bits.
 
 ## Unique ordered join
 

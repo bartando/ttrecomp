@@ -66,7 +66,7 @@ by logical draw count.
 | `BCFD62344925BA44` | 10 | 10 | 9,749 | PRE/MIXED | Venue offscreen/reflection or lighting prepass using the same 4EAE geometry class as 14D. | H |
 | `F17EBE6C26907F7A` | 10 | 10 | 30 | PRE/POST MIXED | Fullscreen resolve/post-effect helper. | H |
 | `1E2A0DEE4F646065` | 27 | 9 | 20,573 | MAIN | High-cost player material/depth family with 21 bindings. | H |
-| `9E1AF02A96682354` | 27 | 9 | 1,663 | MAIN | Alpha/special static venue props. | M |
+| `9E1AF02A96682354` | 27 | 9 | 1,663 | MAIN | Opaque RGB-only textured/fogged static venue props; alpha is computed but masked at the target. | H |
 | `BB90345BFEEE544B` | 24 | 8 | 9,378 | MAIN | Table-net family: two visible 4,680-index net submissions plus six 3-index helper draws. | H |
 | `E23F5FEA5FD5399E` | 24 | 8 | 7,293 | MAIN | Player material family with 20 bindings and multiple skinned VS variants. | H |
 | `F67534A48B71FF64` | 8 | 8 | 228 | PRE/MIXED | Player-effect/offscreen material followed by resolve helpers. | M |

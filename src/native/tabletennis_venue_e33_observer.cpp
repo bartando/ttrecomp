@@ -5,10 +5,12 @@
 #include "native/tabletennis_guest_memory.h"
 #include "native/tabletennis_main_coverage_ledger.h"
 #include "native/tabletennis_scene_draw_catalog.h"
+#include "native/tabletennis_venue_e33_renderer.h"
 
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <deque>
@@ -27,8 +29,9 @@
 
 REXCVAR_DEFINE_BOOL(
     tabletennis_native_venue_e33_observer, false, "Table Tennis",
-    "Capture immutable E33 static-venue candidates and publish only after an "
-    "exact same-frame dynamic three-tile backend hash/order proof. "
+    "Learn E33 static-venue identity from an exact same-frame dynamic "
+    "three-tile backend hash/order proof, then capture immutable payloads only "
+    "for matching learned draws. "
     "Observer-only; never suppresses or replaces a draw.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
@@ -37,10 +40,13 @@ namespace {
 
 namespace nrhi = rex::graphics::nrhi;
 
-constexpr uint64_t kVertexShaderHash = 0x37F2AEC8A23E44E0ull;
-constexpr uint64_t kPixelShaderHash = 0xE33DEAA20A98FCEFull;
+constexpr uint64_t kVertexShaderHash = kVenueE33VertexShaderHash;
+constexpr uint64_t kPixelShaderHash = kVenueE33PixelShaderHash;
 constexpr uint32_t kGameplayRenderPassKey = 0x0000000E;
 constexpr uint32_t kGameplaySurfacePitch = 1280;
+constexpr uint32_t kMainColorEdramBase = 0x400;
+constexpr uint32_t kMainDepthEdramBase = 0;
+constexpr uint32_t kMainEdramMode = 4;
 constexpr uint32_t kTriangleStripPrimitive = 6;
 constexpr uint32_t kNormalizedDepthControl = 0x00700736;
 constexpr uint32_t kNormalizedColorMask = 0x00000007;
@@ -51,10 +57,49 @@ constexpr size_t kMaximumRetainedFrames = 8;
 constexpr size_t kMaximumQueuedBackendEvents = 4096;
 constexpr uint32_t kMaximumRendererContractLogs = 6;
 constexpr uint32_t kMaximumSelectedMaterialContractLogs = 6;
+constexpr uint32_t kPixelConstantBankOffset = 0x1780;
+constexpr uint32_t kConstantRowBytes = 16;
+constexpr size_t kMaximumApplyPassCommands = 64;
+
+struct ApplyPassDeviceCommand {
+  uint32_t device_subobject_offset = 0;
+  uint32_t argument = 0;
+};
+
+struct ApplyPassSamplerCommand {
+  uint16_t argument = 0;
+  uint16_t device_subobject_offset = 0;
+  uint32_t value = 0;
+};
+
+struct ApplyPassProbe {
+  uint64_t learned_generation = 0;
+  uint32_t pass_descriptor = 0;
+  uint32_t program_pair = 0;
+  uint32_t runtime_state = 0;
+  uint32_t device = 0;
+  uint32_t device_command_list = 0;
+  uint32_t sampler_command_list = 0;
+  uint32_t declared_device_command_count = 0;
+  uint32_t declared_sampler_command_count = 0;
+  uint32_t captured_device_command_count = 0;
+  uint32_t captured_sampler_command_count = 0;
+  std::array<ApplyPassDeviceCommand, kMaximumApplyPassCommands>
+      device_commands{};
+  std::array<ApplyPassSamplerCommand, kMaximumApplyPassCommands>
+      sampler_commands{};
+  std::array<uint32_t, 4> c20_before{};
+  std::array<uint32_t, 4> c255_before{};
+  bool command_lists_valid = false;
+  bool constants_before_valid = false;
+  bool active = false;
+};
 
 struct TitleToken {
   VenueE33TitleCandidate candidate{};
   std::shared_ptr<const VenueE33TitleDrawSnapshot> snapshot;
+  uint64_t capture_generation = 0;
+  uint32_t capture_generation_mismatches = 0;
   uint32_t guest_read_failures = 0;
   uint32_t payload_copy_failures = 0;
   uint32_t texture_capture_failures = 0;
@@ -72,6 +117,10 @@ struct BackendEvent {
 struct BuildingFrame {
   uint64_t sequence = 0;
   uint32_t dropped_candidate_count = 0;
+  uint32_t capture_generation_mismatches = 0;
+  bool capture_identity_latched = false;
+  size_t learned_match_cursor = 0;
+  std::shared_ptr<const VenueE33LearnedIdentitySnapshot> capture_identity;
   std::vector<std::shared_ptr<TitleToken>> candidates;
 };
 
@@ -103,6 +152,8 @@ bool g_announced_capture_rejection = false;
 uint32_t g_title_gate_sample_logs = 0;
 uint32_t g_renderer_contract_logs = 0;
 uint32_t g_selected_material_contract_logs = 0;
+uint64_t g_apply_pass_probe_claimed_generation = 0;
+thread_local ApplyPassProbe g_apply_pass_probe;
 
 struct RawDeclarationSample {
   static constexpr size_t kWordCount = 16;
@@ -111,7 +162,7 @@ struct RawDeclarationSample {
   bool valid = false;
 };
 
-RawDeclarationSample CaptureRawDeclarationSample(uint8_t *base,
+RawDeclarationSample CaptureRawDeclarationSample(uint8_t* base,
                                                  uint32_t declaration) {
   RawDeclarationSample sample;
   if (base == nullptr || declaration == 0) {
@@ -130,17 +181,111 @@ RawDeclarationSample CaptureRawDeclarationSample(uint8_t *base,
   return sample;
 }
 
+bool ProbeReadBeU16(uint8_t* guest_base, uint32_t address, size_t offset,
+                    uint16_t& value) {
+  if (guest_base == nullptr || address == 0 ||
+      offset > std::numeric_limits<uint32_t>::max() - address) {
+    return false;
+  }
+  uint16_t raw = 0;
+  const uint32_t guest_address =
+      address + static_cast<uint32_t>(offset);
+  if (!GuestTryCopy(
+          &raw,
+          guest_base + guest_address + REX_PHYS_HOST_OFFSET(guest_address),
+          sizeof(raw))) {
+    return false;
+  }
+  value = std::byteswap(raw);
+  return true;
+}
+
+bool ProbeReadBeU32(uint8_t* guest_base, uint32_t address, size_t offset,
+                    uint32_t& value) {
+  if (guest_base == nullptr || address == 0 ||
+      offset > std::numeric_limits<uint32_t>::max() - address) {
+    return false;
+  }
+  uint32_t raw = 0;
+  const uint32_t guest_address =
+      address + static_cast<uint32_t>(offset);
+  if (!GuestTryCopy(
+          &raw,
+          guest_base + guest_address + REX_PHYS_HOST_OFFSET(guest_address),
+          sizeof(raw))) {
+    return false;
+  }
+  value = std::byteswap(raw);
+  return true;
+}
+
+bool ProbeReadConstant(uint8_t* guest_base, uint32_t device,
+                       uint32_t register_index,
+                       std::array<uint32_t, 4>& value) {
+  if (register_index > 255 ||
+      register_index >
+          (std::numeric_limits<uint32_t>::max() -
+           kPixelConstantBankOffset) /
+              kConstantRowBytes) {
+    return false;
+  }
+  const uint32_t offset =
+      kPixelConstantBankOffset + register_index * kConstantRowBytes;
+  for (size_t component = 0; component < value.size(); ++component) {
+    if (!ProbeReadBeU32(guest_base, device,
+                        offset + component * sizeof(uint32_t),
+                        value[component])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+float ProbeFloat(uint32_t bits) { return std::bit_cast<float>(bits); }
+
 bool SupportedDepthFormat(nrhi::Format format) {
   return format == nrhi::Format::kD24_UNORM_S8_UINT ||
          format == nrhi::Format::kD32_FLOAT_S8_UINT;
 }
 
-bool IsExactBackendDraw(const rex::graphics::NativeGuestDrawContext &context) {
+bool RawTargetStateMatchesDecoded(
+    const rex::graphics::NativeGuestDrawContext::RenderTargetState& state) {
+  constexpr uint32_t kEdramBaseMask = (1u << 12) - 1;
+  constexpr uint32_t kSurfacePitchMask = (1u << 14) - 1;
+  constexpr uint32_t kEdramModeMask = (1u << 3) - 1;
+  return state.valid &&
+         (state.rb_color_info_0 & kEdramBaseMask) == state.color_edram_base &&
+         (state.rb_depth_info & kEdramBaseMask) == state.depth_edram_base &&
+         (state.rb_surface_info & kSurfacePitchMask) == state.surface_pitch &&
+         (state.rb_modecontrol & kEdramModeMask) == state.edram_mode;
+}
+
+bool IsExactMainTarget(const rex::graphics::NativeGuestDrawContext& context) {
+  const auto& target = context.render_target_state;
+  return RawTargetStateMatchesDecoded(target) &&
+         target.color_edram_base == kMainColorEdramBase &&
+         target.depth_edram_base == kMainDepthEdramBase &&
+         target.surface_pitch == kGameplaySurfacePitch &&
+         target.edram_mode == kMainEdramMode &&
+         context.surface_pitch == target.surface_pitch;
+}
+
+bool ExactBackendVertexFetch(
+    const rex::graphics::NativeGuestDrawContext& context) {
+  return context.primary_vertex_fetch.valid &&
+         context.primary_vertex_fetch.physical_address != 0 &&
+         context.primary_vertex_fetch.byte_count >= kVenueE33VertexStride &&
+         context.primary_vertex_fetch.byte_count % kVenueE33VertexStride == 0 &&
+         context.primary_vertex_fetch.endian == kVenueE33VertexEndian;
+}
+
+bool IsExactBackendDraw(const rex::graphics::NativeGuestDrawContext& context) {
   return context.backend == rex::graphics::NativeGuestOutputBackend::kVulkan &&
          context.backend_frame_sequence != 0 && context.render_pass_key_valid &&
          context.render_pass_key == kGameplayRenderPassKey &&
-         context.surface_pitch == kGameplaySurfacePitch && context.indexed &&
+         IsExactMainTarget(context) && context.indexed &&
          context.guest_index_base_valid && context.guest_index_base != 0 &&
+         ExactBackendVertexFetch(context) &&
          context.draw_state_contract_valid &&
          context.rasterizer_mode_control_valid &&
          context.borrowed_attachment_contract_valid &&
@@ -161,8 +306,8 @@ bool IsExactBackendDraw(const rex::graphics::NativeGuestDrawContext &context) {
          context.sample_mask == std::numeric_limits<uint64_t>::max();
 }
 
-VenueE33BackendContract
-CaptureBackendContract(const rex::graphics::NativeGuestDrawContext &context) {
+VenueE33BackendContract CaptureBackendContract(
+    const rex::graphics::NativeGuestDrawContext& context) {
   VenueE33BackendContract contract;
   contract.vertex_shader_hash = context.vertex_shader_hash;
   contract.pixel_shader_hash = context.pixel_shader_hash;
@@ -174,6 +319,13 @@ CaptureBackendContract(const rex::graphics::NativeGuestDrawContext &context) {
   contract.blend_control_0 = context.blend_control_0;
   contract.rasterizer_mode_control = context.rasterizer_mode_control;
   contract.primitive_restart_index = context.primitive_restart_index;
+  contract.rb_color_info_0 = context.render_target_state.rb_color_info_0;
+  contract.rb_depth_info = context.render_target_state.rb_depth_info;
+  contract.rb_surface_info = context.render_target_state.rb_surface_info;
+  contract.rb_modecontrol = context.render_target_state.rb_modecontrol;
+  contract.color_edram_base = context.render_target_state.color_edram_base;
+  contract.depth_edram_base = context.render_target_state.depth_edram_base;
+  contract.edram_mode = context.render_target_state.edram_mode;
   for (size_t attachment = 0;
        attachment < contract.color_attachment_formats.size(); ++attachment) {
     contract.color_attachment_formats[attachment] =
@@ -189,12 +341,13 @@ CaptureBackendContract(const rex::graphics::NativeGuestDrawContext &context) {
   contract.primitive_restart_enabled = context.primitive_restart_enabled;
   contract.rasterizer_mode_control_valid =
       context.rasterizer_mode_control_valid;
+  contract.render_target_state_valid = context.render_target_state.valid;
   contract.valid = IsExactBackendDraw(context);
   return contract;
 }
 
-bool SameBackendContract(const VenueE33BackendContract &left,
-                         const VenueE33BackendContract &right) {
+bool SameBackendContract(const VenueE33BackendContract& left,
+                         const VenueE33BackendContract& right) {
   return left.valid && right.valid &&
          left.vertex_shader_hash == right.vertex_shader_hash &&
          left.pixel_shader_hash == right.pixel_shader_hash &&
@@ -206,6 +359,13 @@ bool SameBackendContract(const VenueE33BackendContract &left,
          left.blend_control_0 == right.blend_control_0 &&
          left.rasterizer_mode_control == right.rasterizer_mode_control &&
          left.primitive_restart_index == right.primitive_restart_index &&
+         left.rb_color_info_0 == right.rb_color_info_0 &&
+         left.rb_depth_info == right.rb_depth_info &&
+         left.rb_surface_info == right.rb_surface_info &&
+         left.rb_modecontrol == right.rb_modecontrol &&
+         left.color_edram_base == right.color_edram_base &&
+         left.depth_edram_base == right.depth_edram_base &&
+         left.edram_mode == right.edram_mode &&
          left.color_attachment_formats == right.color_attachment_formats &&
          left.color_attachment_count == right.color_attachment_count &&
          left.depth_attachment_format == right.depth_attachment_format &&
@@ -214,19 +374,18 @@ bool SameBackendContract(const VenueE33BackendContract &left,
          left.sample_mask == right.sample_mask &&
          left.primitive_restart_enabled == right.primitive_restart_enabled &&
          left.rasterizer_mode_control_valid ==
-             right.rasterizer_mode_control_valid;
+             right.rasterizer_mode_control_valid &&
+         left.render_target_state_valid == right.render_target_state_valid;
 }
 
-void LogSelectedMaterialContract(const VenueE33TitleDrawSnapshot &draw) {
+void LogSelectedMaterialContract(const VenueE33TitleDrawSnapshot& draw) {
   namespace xenos = rex::graphics::xenos;
 
   for (uint32_t slot = 0;
        slot < draw.material.textures.size() &&
-       g_selected_material_contract_logs <
-           kMaximumSelectedMaterialContractLogs;
+       g_selected_material_contract_logs < kMaximumSelectedMaterialContractLogs;
        ++slot) {
-    const std::array<uint32_t, 6> &words =
-        draw.material.texture_fetches[slot];
+    const std::array<uint32_t, 6>& words = draw.material.texture_fetches[slot];
     xenos::xe_gpu_texture_fetch_t fetch{};
     fetch.dword_0 = words[0];
     fetch.dword_1 = words[1];
@@ -234,11 +393,10 @@ void LogSelectedMaterialContract(const VenueE33TitleDrawSnapshot &draw) {
     fetch.dword_3 = words[3];
     fetch.dword_4 = words[4];
     fetch.dword_5 = words[5];
-    const TextureSnapshot *const texture = draw.material.textures[slot].get();
+    const TextureSnapshot* const texture = draw.material.textures[slot].get();
     const bool cube = slot == 2;
     const xenos::DataDimension expected_dimension =
-        cube ? xenos::DataDimension::kCube
-             : xenos::DataDimension::k2DOrStacked;
+        cube ? xenos::DataDimension::kCube : xenos::DataDimension::k2DOrStacked;
     const xenos::TextureFormat base_format =
         rex::graphics::GetBaseFormat(fetch.format);
     const bool renderer_shape =
@@ -258,8 +416,7 @@ void LogSelectedMaterialContract(const VenueE33TitleDrawSnapshot &draw) {
         "observer_only=true",
         draw.ordinal, slot, static_cast<uint32_t>(fetch.dimension),
         texture != nullptr ? texture->layer_count : 0,
-        static_cast<uint32_t>(fetch.format),
-        static_cast<uint32_t>(base_format),
+        static_cast<uint32_t>(fetch.format), static_cast<uint32_t>(base_format),
         texture != nullptr ? texture->width : 0,
         texture != nullptr ? texture->height : 0,
         static_cast<uint32_t>(fetch.tiled),
@@ -286,9 +443,9 @@ void LogSelectedMaterialContract(const VenueE33TitleDrawSnapshot &draw) {
   }
 }
 
-FrameLedger *FindPendingFrameLocked(uint64_t sequence) {
+FrameLedger* FindPendingFrameLocked(uint64_t sequence) {
   const auto found =
-      std::ranges::find_if(g_frames, [sequence](const FrameLedger &frame) {
+      std::ranges::find_if(g_frames, [sequence](const FrameLedger& frame) {
         return frame.sequence == sequence && !frame.finalized;
       });
   return found == g_frames.end() ? nullptr : &*found;
@@ -296,49 +453,68 @@ FrameLedger *FindPendingFrameLocked(uint64_t sequence) {
 
 void UpdatePendingCountsLocked() {
   g_telemetry.pending_frames = static_cast<uint32_t>(
-      std::ranges::count_if(g_frames, [](const FrameLedger &frame) {
+      std::ranges::count_if(g_frames, [](const FrameLedger& frame) {
         return !frame.finalized && !frame.title.candidates.empty();
       }));
   g_telemetry.queued_backend_events =
       static_cast<uint32_t>(g_backend_events.size());
 }
 
-void RecordMismatchLocked(FrameLedger &frame) {
+void RecordMismatchLocked(FrameLedger& frame) {
   ++frame.backend_sequence_mismatches;
   ++g_telemetry.backend_sequence_mismatches;
 }
 
-void AnnounceAnalysisMismatch(const FrameLedger &frame, const char *reason,
-                              size_t event_index, const BackendEvent *expected,
-                              const BackendEvent *observed) {
+void ResetLearnedIdentityLocked() {
+  if (g_learned_identity == nullptr) {
+    return;
+  }
+  g_learned_identity.reset();
+  g_published_frame.reset();
+  g_logged_published_generation = 0;
+  g_telemetry.learned_generation = 0;
+  g_telemetry.learned_unique_program_count = 0;
+}
+
+void AnnounceAnalysisMismatch(const FrameLedger& frame, const char* reason,
+                              size_t event_index, const BackendEvent* expected,
+                              const BackendEvent* observed) {
   if (g_announced_mismatch) {
     return;
   }
   g_announced_mismatch = true;
   const BackendEvent empty{};
-  const BackendEvent &expected_event = expected != nullptr ? *expected : empty;
-  const BackendEvent &observed_event = observed != nullptr ? *observed : empty;
-  REXLOG_INFO("Table Tennis E33 venue observer: frame-bucket mismatch "
-              "title_frame={} backend_frame={} reason={} event={} "
-              "backend_events={} title_candidates={} "
-              "expected[primitive={} indices={} base={:08X}] "
-              "observed[primitive={} indices={} base={:08X}] "
-              "observer_only=true guest_suppressed=false",
-              frame.sequence, observed_event.backend_frame_sequence, reason,
-              event_index, frame.backend_events.size(),
-              frame.title.candidates.size(),
-              expected_event.identity.primitive_type,
-              expected_event.identity.submitted_index_count,
-              expected_event.identity.guest_index_base,
-              observed_event.identity.primitive_type,
-              observed_event.identity.submitted_index_count,
-              observed_event.identity.guest_index_base);
+  const BackendEvent& expected_event = expected != nullptr ? *expected : empty;
+  const BackendEvent& observed_event = observed != nullptr ? *observed : empty;
+  REXLOG_INFO(
+      "Table Tennis E33 venue observer: frame-bucket mismatch "
+      "title_frame={} backend_frame={} reason={} event={} "
+      "backend_events={} title_candidates={} "
+      "expected[primitive={} indices={} ib={:08X} "
+      "vb={:08X}/{} endian={}] "
+      "observed[primitive={} indices={} ib={:08X} "
+      "vb={:08X}/{} endian={}] "
+      "observer_only=true guest_suppressed=false",
+      frame.sequence, observed_event.backend_frame_sequence, reason,
+      event_index, frame.backend_events.size(), frame.title.candidates.size(),
+      expected_event.identity.primitive_type,
+      expected_event.identity.submitted_index_count,
+      expected_event.identity.guest_index_base,
+      expected_event.identity.guest_vertex_base,
+      expected_event.identity.guest_vertex_bytes,
+      expected_event.identity.guest_vertex_endian,
+      observed_event.identity.primitive_type,
+      observed_event.identity.submitted_index_count,
+      observed_event.identity.guest_index_base,
+      observed_event.identity.guest_vertex_base,
+      observed_event.identity.guest_vertex_bytes,
+      observed_event.identity.guest_vertex_endian);
 }
 
-uint32_t
-UniqueProgramCount(const std::vector<VenueE33TitleProgramIdentity> &programs) {
+uint32_t UniqueProgramCount(
+    const std::vector<VenueE33TitleProgramIdentity>& programs) {
   std::vector<VenueE33TitleProgramIdentity> unique;
-  for (const VenueE33TitleProgramIdentity &program : programs) {
+  for (const VenueE33TitleProgramIdentity& program : programs) {
     if (std::ranges::find(unique, program) == unique.end()) {
       unique.push_back(program);
     }
@@ -347,9 +523,9 @@ UniqueProgramCount(const std::vector<VenueE33TitleProgramIdentity> &programs) {
 }
 
 bool ExtractOrderedIdentity(
-    const FrameLedger &frame,
-    std::vector<VenueE33TitleProgramIdentity> &programs,
-    std::vector<VenueE33VertexDeclarationIdentity> &declarations) {
+    const FrameLedger& frame,
+    std::vector<VenueE33TitleProgramIdentity>& programs,
+    std::vector<VenueE33VertexDeclarationIdentity>& declarations) {
   programs.clear();
   declarations.clear();
   programs.reserve(frame.selected_candidate_indices.size());
@@ -359,7 +535,7 @@ bool ExtractOrderedIdentity(
         frame.title.candidates[candidate_index] == nullptr) {
       return false;
     }
-    const VenueE33TitleCandidate &candidate =
+    const VenueE33TitleCandidate& candidate =
         frame.title.candidates[candidate_index]->candidate;
     if (!candidate.program.valid() || !candidate.vertex_declaration.valid()) {
       return false;
@@ -371,14 +547,24 @@ bool ExtractOrderedIdentity(
 }
 
 bool SameLearnedIdentity(
-    const VenueE33LearnedIdentitySnapshot &learned,
-    const std::vector<VenueE33TitleProgramIdentity> &programs,
-    const std::vector<VenueE33VertexDeclarationIdentity> &declarations) {
+    const VenueE33LearnedIdentitySnapshot& learned,
+    const std::vector<VenueE33TitleProgramIdentity>& programs,
+    const std::vector<VenueE33VertexDeclarationIdentity>& declarations) {
   return learned.valid() && learned.ordered_draw_programs == programs &&
          learned.ordered_vertex_declarations == declarations;
 }
 
-bool PrepareLearnedIdentityLocked(FrameLedger &frame) {
+bool MatchesLearnedPosition(const VenueE33TitleCandidate& candidate,
+                            const VenueE33LearnedIdentitySnapshot& learned,
+                            size_t position) {
+  return learned.valid() && position < learned.ordered_draw_programs.size() &&
+         position < learned.ordered_vertex_declarations.size() &&
+         candidate.program == learned.ordered_draw_programs[position] &&
+         candidate.vertex_declaration ==
+             learned.ordered_vertex_declarations[position];
+}
+
+bool PrepareLearnedIdentityLocked(FrameLedger& frame) {
   std::vector<VenueE33TitleProgramIdentity> programs;
   std::vector<VenueE33VertexDeclarationIdentity> declarations;
   if (!ExtractOrderedIdentity(frame, programs, declarations)) {
@@ -407,29 +593,30 @@ bool PrepareLearnedIdentityLocked(FrameLedger &frame) {
   g_telemetry.learned_unique_program_count =
       g_learned_identity->unique_program_count;
 
-  REXLOG_INFO("Table Tennis E33 venue observer: learned generation={} frame={} "
-              "live_draws={} live_indices={} unique_title_programs={} "
-              "backend_tiles=3 observer_only=true guest_suppressed=false",
-              g_learned_identity->generation, frame.sequence,
-              frame.selected_candidate_indices.size(),
-              frame.matched_index_count,
-              g_learned_identity->unique_program_count);
+  REXLOG_INFO(
+      "Table Tennis E33 venue observer: learned generation={} frame={} "
+      "live_draws={} live_indices={} unique_title_programs={} "
+      "backend_tiles=3 observer_only=true guest_suppressed=false",
+      g_learned_identity->generation, frame.sequence,
+      frame.selected_candidate_indices.size(), frame.matched_index_count,
+      g_learned_identity->unique_program_count);
   std::vector<VenueE33TitleProgramIdentity> announced;
-  for (const VenueE33TitleProgramIdentity &program :
+  for (const VenueE33TitleProgramIdentity& program :
        g_learned_identity->ordered_draw_programs) {
     if (std::ranges::find(announced, program) != announced.end()) {
       continue;
     }
     announced.push_back(program);
-    REXLOG_INFO("  E33 title identity pass={:08X} program={:08X} "
-                "vs={:08X} ps={:08X} observer_only=true",
-                program.pass_descriptor, program.program_pair,
-                program.vertex_shader, program.pixel_shader);
+    REXLOG_INFO(
+        "  E33 title identity pass={:08X} program={:08X} "
+        "vs={:08X} ps={:08X} observer_only=true",
+        program.pass_descriptor, program.program_pair, program.vertex_shader,
+        program.pixel_shader);
   }
   return true;
 }
 
-void PublishFrameLocked(FrameLedger &frame) {
+void PublishFrameLocked(FrameLedger& frame) {
   auto published = std::make_shared<VenueE33FrameSnapshot>();
   published->sequence = frame.sequence;
   published->backend_frame_sequence = frame.sequence;
@@ -446,6 +633,13 @@ void PublishFrameLocked(FrameLedger &frame) {
           ? published->title_candidate_count - published->matched_draw_count
           : 0;
   published->dropped_candidate_count = frame.title.dropped_candidate_count;
+  published->capture_generation_mismatches =
+      frame.title.capture_generation_mismatches;
+  if (frame.title.capture_identity != nullptr &&
+      frame.title.capture_identity->generation !=
+          published->learned_generation) {
+    ++published->capture_generation_mismatches;
+  }
   published->backend_event_count =
       static_cast<uint32_t>(frame.backend_events.size());
   published->backend_draws_per_tile = published->matched_draw_count;
@@ -463,7 +657,15 @@ void PublishFrameLocked(FrameLedger &frame) {
         frame.title.candidates[selected] == nullptr) {
       continue;
     }
-    const TitleToken &token = *frame.title.candidates[selected];
+    const TitleToken& token = *frame.title.candidates[selected];
+    published->capture_generation_mismatches +=
+        token.capture_generation_mismatches;
+    if (frame.title.capture_identity != nullptr &&
+        frame.title.capture_identity->generation ==
+            published->learned_generation &&
+        token.capture_generation != published->learned_generation) {
+      ++published->capture_generation_mismatches;
+    }
     published->guest_read_failures += token.guest_read_failures;
     published->payload_copy_failures += token.payload_copy_failures;
     published->texture_capture_failures += token.texture_capture_failures;
@@ -480,6 +682,8 @@ void PublishFrameLocked(FrameLedger &frame) {
   ObserveMainCoverageFamilyFrame(g_published_frame);
   frame.finalized = true;
   ++g_telemetry.finalized_frames;
+  g_telemetry.capture_generation_mismatches +=
+      g_published_frame->capture_generation_mismatches;
   if (!g_published_frame->valid()) {
     ++g_telemetry.capture_frames_rejected;
     if (!g_announced_capture_rejection) {
@@ -488,7 +692,7 @@ void PublishFrameLocked(FrameLedger &frame) {
           "Table Tennis E33 venue observer: rejected frame={} "
           "generation={} candidates={} matched={} indices={} dropped={} "
           "reads={} payloads={} textures={} materials={} backend_events={} "
-          "tiles={} mismatches={} "
+          "tiles={} backend_mismatches={} capture_generation_mismatches={} "
           "observer_only=true guest_suppressed=false",
           g_published_frame->sequence, g_published_frame->learned_generation,
           g_published_frame->title_candidate_count,
@@ -501,14 +705,15 @@ void PublishFrameLocked(FrameLedger &frame) {
           g_published_frame->material_validation_failures,
           g_published_frame->backend_event_count,
           g_published_frame->backend_tile_blocks_matched,
-          g_published_frame->backend_sequence_mismatches);
+          g_published_frame->backend_sequence_mismatches,
+          g_published_frame->capture_generation_mismatches);
     }
     return;
   }
 
   ++g_telemetry.valid_frames;
   g_telemetry.latest_published_sequence = g_published_frame->sequence;
-  for (const VenueE33DrawSnapshot &draw : g_published_frame->draws) {
+  for (const VenueE33DrawSnapshot& draw : g_published_frame->draws) {
     if (draw.title != nullptr) {
       LogSelectedMaterialContract(*draw.title);
     }
@@ -528,7 +733,16 @@ void PublishFrameLocked(FrameLedger &frame) {
   }
 }
 
-void AnalyzeFrameLocked(FrameLedger &frame) {
+bool TitleMatchesBackend(const std::shared_ptr<TitleToken>& candidate,
+                         const BackendEvent& event) {
+  return candidate != nullptr && candidate->candidate.eligible &&
+         candidate->candidate.identity == event.identity &&
+         event.contract.valid &&
+         event.contract.vertex_shader_hash == kVertexShaderHash &&
+         event.contract.pixel_shader_hash == kPixelShaderHash;
+}
+
+void AnalyzeFrameLocked(FrameLedger& frame) {
   ++g_telemetry.backend_frames_analyzed;
   const size_t event_count = frame.backend_events.size();
   if (event_count == 0 ||
@@ -536,6 +750,7 @@ void AnalyzeFrameLocked(FrameLedger &frame) {
     AnnounceAnalysisMismatch(frame, "event-count-not-three-blocks", 0, nullptr,
                              nullptr);
     RecordMismatchLocked(frame);
+    ResetLearnedIdentityLocked();
     PublishFrameLocked(frame);
     return;
   }
@@ -546,6 +761,7 @@ void AnalyzeFrameLocked(FrameLedger &frame) {
     AnnounceAnalysisMismatch(frame, "draw-count-exceeds-title", 0, nullptr,
                              &frame.backend_events.front());
     RecordMismatchLocked(frame);
+    ResetLearnedIdentityLocked();
     PublishFrameLocked(frame);
     return;
   }
@@ -553,8 +769,8 @@ void AnalyzeFrameLocked(FrameLedger &frame) {
   for (size_t tile = 1; tile < VenueE33FrameSnapshot::kRequiredTileBlockCount;
        ++tile) {
     for (size_t draw = 0; draw < draws_per_tile; ++draw) {
-      const BackendEvent &expected = frame.backend_events[draw];
-      const BackendEvent &observed =
+      const BackendEvent& expected = frame.backend_events[draw];
+      const BackendEvent& observed =
           frame.backend_events[tile * draws_per_tile + draw];
       if (expected.backend_frame_sequence != frame.sequence ||
           observed.backend_frame_sequence != frame.sequence ||
@@ -564,37 +780,74 @@ void AnalyzeFrameLocked(FrameLedger &frame) {
                                  tile * draws_per_tile + draw, &expected,
                                  &observed);
         RecordMismatchLocked(frame);
+        ResetLearnedIdentityLocked();
         PublishFrameLocked(frame);
         return;
       }
     }
   }
 
-  size_t candidate_search_index = 0;
-  frame.selected_candidate_indices.reserve(draws_per_tile);
-  frame.first_block_identities.reserve(draws_per_tile);
-  frame.first_block_contracts.reserve(draws_per_tile);
+  std::vector<size_t> earliest(draws_per_tile);
+  size_t candidate_cursor = 0;
   for (size_t draw = 0; draw < draws_per_tile; ++draw) {
-    const BackendEvent &event = frame.backend_events[draw];
-    size_t candidate_index = frame.title.candidates.size();
-    for (size_t index = candidate_search_index;
-         index < frame.title.candidates.size(); ++index) {
-      const auto &candidate = frame.title.candidates[index];
-      if (candidate != nullptr &&
-          candidate->candidate.identity == event.identity) {
-        candidate_index = index;
-        break;
-      }
-    }
-    if (candidate_index == frame.title.candidates.size()) {
+    const BackendEvent& event = frame.backend_events[draw];
+    const auto found =
+        std::find_if(frame.title.candidates.begin() +
+                         static_cast<std::ptrdiff_t>(candidate_cursor),
+                     frame.title.candidates.end(),
+                     [&](const std::shared_ptr<TitleToken>& candidate) {
+                       return TitleMatchesBackend(candidate, event);
+                     });
+    if (found == frame.title.candidates.end()) {
       AnnounceAnalysisMismatch(frame, "backend-title-join", draw, nullptr,
                                &event);
       RecordMismatchLocked(frame);
+      ResetLearnedIdentityLocked();
       PublishFrameLocked(frame);
       return;
     }
-    candidate_search_index = candidate_index + 1;
-    frame.selected_candidate_indices.push_back(candidate_index);
+    earliest[draw] =
+        static_cast<size_t>(found - frame.title.candidates.begin());
+    candidate_cursor = earliest[draw] + 1;
+  }
+
+  std::vector<size_t> latest(draws_per_tile);
+  candidate_cursor = frame.title.candidates.size();
+  for (size_t draw = draws_per_tile; draw-- > 0;) {
+    const BackendEvent& event = frame.backend_events[draw];
+    bool matched = false;
+    while (candidate_cursor != 0) {
+      --candidate_cursor;
+      if (TitleMatchesBackend(frame.title.candidates[candidate_cursor],
+                              event)) {
+        latest[draw] = candidate_cursor;
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) {
+      AnnounceAnalysisMismatch(frame, "backend-title-reverse-join", draw,
+                               nullptr, &event);
+      RecordMismatchLocked(frame);
+      ResetLearnedIdentityLocked();
+      PublishFrameLocked(frame);
+      return;
+    }
+  }
+  if (earliest != latest) {
+    AnnounceAnalysisMismatch(frame, "backend-title-ambiguous", 0, nullptr,
+                             &frame.backend_events.front());
+    RecordMismatchLocked(frame);
+    ResetLearnedIdentityLocked();
+    PublishFrameLocked(frame);
+    return;
+  }
+
+  frame.selected_candidate_indices = std::move(earliest);
+  frame.first_block_identities.reserve(draws_per_tile);
+  frame.first_block_contracts.reserve(draws_per_tile);
+  for (size_t draw = 0; draw < draws_per_tile; ++draw) {
+    const BackendEvent& event = frame.backend_events[draw];
     frame.first_block_identities.push_back(event.identity);
     frame.first_block_contracts.push_back(event.contract);
     frame.matched_index_count += event.identity.submitted_index_count;
@@ -609,6 +862,7 @@ void AnalyzeFrameLocked(FrameLedger &frame) {
     AnnounceAnalysisMismatch(frame, "title-program-identity", 0, nullptr,
                              &frame.backend_events.front());
     RecordMismatchLocked(frame);
+    ResetLearnedIdentityLocked();
   }
   PublishFrameLocked(frame);
 }
@@ -616,15 +870,16 @@ void AnalyzeFrameLocked(FrameLedger &frame) {
 void ReconcileBackendEventsLocked() {
   auto event = g_backend_events.begin();
   while (event != g_backend_events.end()) {
-    FrameLedger *frame = FindPendingFrameLocked(event->backend_frame_sequence);
+    FrameLedger* frame = FindPendingFrameLocked(event->backend_frame_sequence);
     if (frame != nullptr) {
       frame->backend_events.push_back(std::move(*event));
       event = g_backend_events.erase(event);
       continue;
     }
-    // A title ledger is stamped at Swap. Once that sequence has already
-    // passed, an event with no exact ledger can never be assigned safely.
-    if (event->backend_frame_sequence <= g_latest_catalog_sequence) {
+    // The catalog sequence becomes current before its FrameLedger is inserted
+    // at Swap, so an equal-sequence backend event must remain queued for that
+    // imminent exact join. Only strictly older events are stale.
+    if (event->backend_frame_sequence < g_latest_catalog_sequence) {
       ++g_telemetry.backend_events_stale;
       ++g_telemetry.backend_events_without_title_frame;
       event = g_backend_events.erase(event);
@@ -636,7 +891,7 @@ void ReconcileBackendEventsLocked() {
 
 void AnalyzeCompletedFramesLocked() {
   const uint64_t completed_before = g_telemetry.latest_backend_frame_sequence;
-  for (FrameLedger &frame : g_frames) {
+  for (FrameLedger& frame : g_frames) {
     if (!frame.finalized && frame.sequence < completed_before) {
       AnalyzeFrameLocked(frame);
     }
@@ -652,7 +907,7 @@ void ExpireFramesLocked() {
   }
 }
 
-} // namespace
+}  // namespace
 
 bool VenueE33FrameSnapshot::valid() const {
   if (sequence == 0 || backend_frame_sequence != sequence ||
@@ -691,11 +946,193 @@ bool VenueE33FrameSnapshot::valid() const {
 
 bool VenueE33ObserverEnabled() {
   return REXCVAR_GET(tabletennis_native_venue_e33_observer) ||
-         NativeFrameSceneCaptureEnabled();
+         VenueE33RendererEnabled() || NativeFrameSceneFullCaptureEnabled();
 }
 
-void ObserveVenueE33TitleDraw(uint8_t *guest_base,
-                              const SceneCatalogDrawOccurrence &draw) {
+void BeginVenueE33ApplyPassProbe(uint8_t* guest_base, uint32_t runtime_state,
+                                 uint32_t pass_descriptor) {
+  g_apply_pass_probe = {};
+  if (!VenueE33ObserverEnabled() || guest_base == nullptr ||
+      runtime_state == 0 || pass_descriptor == 0) {
+    return;
+  }
+
+  std::shared_ptr<const VenueE33LearnedIdentitySnapshot> learned;
+  {
+    std::lock_guard lock(g_observer_mutex);
+    learned = g_learned_identity;
+    if (learned == nullptr || !learned->valid() ||
+        learned->generation == g_apply_pass_probe_claimed_generation) {
+      return;
+    }
+  }
+
+  const auto learned_program = std::ranges::find(
+      learned->ordered_draw_programs, pass_descriptor,
+      &VenueE33TitleProgramIdentity::pass_descriptor);
+  if (learned_program == learned->ordered_draw_programs.end()) {
+    return;
+  }
+
+  ApplyPassProbe probe;
+  probe.learned_generation = learned->generation;
+  probe.pass_descriptor = pass_descriptor;
+  probe.program_pair = learned_program->program_pair;
+  probe.runtime_state = runtime_state;
+  bool valid =
+      ProbeReadBeU32(guest_base, pass_descriptor, 0x08, probe.program_pair) &&
+      probe.program_pair == learned_program->program_pair &&
+      ProbeReadBeU32(guest_base, runtime_state, 0x2BC, probe.device) &&
+      ProbeReadBeU32(guest_base, pass_descriptor, 0x0C,
+                     probe.device_command_list) &&
+      ProbeReadBeU32(guest_base, pass_descriptor, 0x10,
+                     probe.sampler_command_list);
+  valid =
+      valid && probe.device != 0 && probe.device_command_list != 0 &&
+      probe.sampler_command_list != 0 &&
+      ProbeReadBeU32(guest_base, probe.device_command_list, 0x10,
+                     probe.declared_device_command_count) &&
+      ProbeReadBeU32(guest_base, probe.sampler_command_list, 0x80,
+                     probe.declared_sampler_command_count) &&
+      probe.declared_device_command_count <= kMaximumApplyPassCommands &&
+      probe.declared_sampler_command_count <= kMaximumApplyPassCommands;
+  if (!valid) {
+    return;
+  }
+
+  probe.captured_device_command_count =
+      probe.declared_device_command_count;
+  for (size_t index = 0; index < probe.captured_device_command_count;
+       ++index) {
+    ApplyPassDeviceCommand& command = probe.device_commands[index];
+    const size_t offset = 0x14 + index * 8;
+    valid =
+        ProbeReadBeU32(guest_base, probe.device_command_list, offset,
+                       command.device_subobject_offset) &&
+        ProbeReadBeU32(guest_base, probe.device_command_list, offset + 4,
+                       command.argument);
+    if (!valid) {
+      return;
+    }
+  }
+
+  probe.captured_sampler_command_count =
+      probe.declared_sampler_command_count;
+  for (size_t index = 0; index < probe.captured_sampler_command_count;
+       ++index) {
+    ApplyPassSamplerCommand& command = probe.sampler_commands[index];
+    const size_t offset = 0x84 + index * 8;
+    valid =
+        ProbeReadBeU16(guest_base, probe.sampler_command_list, offset,
+                       command.argument) &&
+        ProbeReadBeU16(guest_base, probe.sampler_command_list, offset + 2,
+                       command.device_subobject_offset) &&
+        ProbeReadBeU32(guest_base, probe.sampler_command_list, offset + 4,
+                       command.value);
+    if (!valid) {
+      return;
+    }
+  }
+  probe.command_lists_valid = true;
+  probe.constants_before_valid =
+      ProbeReadConstant(guest_base, probe.device, 20, probe.c20_before) &&
+      ProbeReadConstant(guest_base, probe.device, 255, probe.c255_before);
+  if (!probe.constants_before_valid) {
+    return;
+  }
+
+  {
+    std::lock_guard lock(g_observer_mutex);
+    if (g_learned_identity != learned ||
+        g_apply_pass_probe_claimed_generation == learned->generation) {
+      return;
+    }
+    g_apply_pass_probe_claimed_generation = learned->generation;
+  }
+  probe.active = true;
+  g_apply_pass_probe = probe;
+}
+
+void EndVenueE33ApplyPassProbe(uint8_t* guest_base) {
+  if (!g_apply_pass_probe.active) {
+    return;
+  }
+  ApplyPassProbe probe = g_apply_pass_probe;
+  g_apply_pass_probe = {};
+
+  std::array<uint32_t, 4> c20_after{};
+  std::array<uint32_t, 4> c255_after{};
+  const bool constants_after_valid =
+      ProbeReadConstant(guest_base, probe.device, 20, c20_after) &&
+      ProbeReadConstant(guest_base, probe.device, 255, c255_after);
+  if (!constants_after_valid) {
+    std::lock_guard lock(g_observer_mutex);
+    if (g_apply_pass_probe_claimed_generation ==
+        probe.learned_generation) {
+      g_apply_pass_probe_claimed_generation = 0;
+    }
+  }
+  const bool c20_changed =
+      constants_after_valid && c20_after != probe.c20_before;
+  const bool c255_changed =
+      constants_after_valid && c255_after != probe.c255_before;
+
+  REXLOG_INFO(
+      "Table Tennis E33 ApplyPass boundary: generation={} pass={:08X} "
+      "program={:08X} runtime={:08X} device={:08X} "
+      "device_list={:08X}/{} sampler_list={:08X}/{} "
+      "before_valid={} after_valid={} c20_changed={} c255_changed={} "
+      "observer_only=true guest_mutated=false",
+      probe.learned_generation, probe.pass_descriptor, probe.program_pair,
+      probe.runtime_state, probe.device, probe.device_command_list,
+      probe.declared_device_command_count, probe.sampler_command_list,
+      probe.declared_sampler_command_count, probe.constants_before_valid,
+      constants_after_valid, c20_changed, c255_changed);
+  REXLOG_INFO(
+      "  E33 ApplyPass c20 before=[{:.9g},{:.9g},{:.9g},{:.9g}] "
+      "bits={:08X}/{:08X}/{:08X}/{:08X} "
+      "after=[{:.9g},{:.9g},{:.9g},{:.9g}] "
+      "bits={:08X}/{:08X}/{:08X}/{:08X}",
+      ProbeFloat(probe.c20_before[0]), ProbeFloat(probe.c20_before[1]),
+      ProbeFloat(probe.c20_before[2]), ProbeFloat(probe.c20_before[3]),
+      probe.c20_before[0], probe.c20_before[1], probe.c20_before[2],
+      probe.c20_before[3], ProbeFloat(c20_after[0]),
+      ProbeFloat(c20_after[1]), ProbeFloat(c20_after[2]),
+      ProbeFloat(c20_after[3]), c20_after[0], c20_after[1], c20_after[2],
+      c20_after[3]);
+  REXLOG_INFO(
+      "  E33 ApplyPass c255 before=[{:.9g},{:.9g},{:.9g},{:.9g}] "
+      "bits={:08X}/{:08X}/{:08X}/{:08X} "
+      "after=[{:.9g},{:.9g},{:.9g},{:.9g}] "
+      "bits={:08X}/{:08X}/{:08X}/{:08X}",
+      ProbeFloat(probe.c255_before[0]), ProbeFloat(probe.c255_before[1]),
+      ProbeFloat(probe.c255_before[2]), ProbeFloat(probe.c255_before[3]),
+      probe.c255_before[0], probe.c255_before[1], probe.c255_before[2],
+      probe.c255_before[3], ProbeFloat(c255_after[0]),
+      ProbeFloat(c255_after[1]), ProbeFloat(c255_after[2]),
+      ProbeFloat(c255_after[3]), c255_after[0], c255_after[1], c255_after[2],
+      c255_after[3]);
+  for (size_t index = 0; index < probe.captured_device_command_count;
+       ++index) {
+    const ApplyPassDeviceCommand& command = probe.device_commands[index];
+    REXLOG_INFO(
+        "  E33 ApplyPass device_cmd[{}] subobject_offset={:04X} "
+        "argument={:08X}",
+        index, command.device_subobject_offset, command.argument);
+  }
+  for (size_t index = 0; index < probe.captured_sampler_command_count;
+       ++index) {
+    const ApplyPassSamplerCommand& command = probe.sampler_commands[index];
+    REXLOG_INFO(
+        "  E33 ApplyPass sampler_cmd[{}] subobject_offset={:04X} "
+        "argument={:04X} value={:08X}",
+        index, command.device_subobject_offset, command.argument,
+        command.value);
+  }
+}
+
+void ObserveVenueE33TitleDraw(uint8_t* guest_base,
+                              const SceneCatalogDrawOccurrence& draw) {
   if (!VenueE33ObserverEnabled()) {
     return;
   }
@@ -734,7 +1171,13 @@ void ObserveVenueE33TitleDraw(uint8_t *guest_base,
       requested_index_bytes != 0 &&
       requested_index_bytes <= draw.mesh.index_buffer_bytes;
   bool log_gate_sample = false;
-  bool candidate_capacity = false;
+  bool candidate_admitted = false;
+  bool capture_planned = false;
+  std::shared_ptr<TitleToken> token;
+  if (candidate.eligible) {
+    token = std::make_shared<TitleToken>();
+    token->candidate = candidate;
+  }
   {
     std::lock_guard lock(g_observer_mutex);
     ++g_telemetry.title_draws_observed;
@@ -751,11 +1194,41 @@ void ObserveVenueE33TitleDraw(uint8_t *guest_base,
     g_title_gate_sample_logs += log_gate_sample;
     if (candidate.eligible) {
       ++g_telemetry.title_candidates;
-      if (g_building_frame.candidates.size() == kMaximumTitleCandidates) {
+      const bool frame_sequence_matches =
+          draw.frame_sequence != 0 &&
+          (g_building_frame.sequence == 0 ||
+           g_building_frame.sequence == draw.frame_sequence);
+      if (!frame_sequence_matches ||
+          g_building_frame.candidates.size() == kMaximumTitleCandidates) {
         ++g_building_frame.dropped_candidate_count;
       } else {
-        candidate_capacity = true;
-        ++g_telemetry.title_capture_attempts;
+        if (g_building_frame.sequence == 0) {
+          g_building_frame.sequence = draw.frame_sequence;
+        }
+        if (!g_building_frame.capture_identity_latched) {
+          g_building_frame.capture_identity_latched = true;
+          if (g_learned_identity != nullptr && g_learned_identity->valid()) {
+            g_building_frame.capture_identity = g_learned_identity;
+          }
+        }
+        const auto& capture_identity = g_building_frame.capture_identity;
+        if (capture_identity != nullptr) {
+          const bool generation_current =
+              g_learned_identity != nullptr &&
+              g_learned_identity->generation == capture_identity->generation;
+          if (!generation_current) {
+            g_building_frame.capture_generation_mismatches = 1;
+          }
+          const size_t position = g_building_frame.learned_match_cursor;
+          if (MatchesLearnedPosition(candidate, *capture_identity, position)) {
+            token->capture_generation = capture_identity->generation;
+            ++g_building_frame.learned_match_cursor;
+            capture_planned = generation_current;
+            g_telemetry.title_capture_attempts += capture_planned;
+          }
+        }
+        g_building_frame.candidates.push_back(token);
+        candidate_admitted = true;
       }
     }
   }
@@ -767,62 +1240,74 @@ void ObserveVenueE33TitleDraw(uint8_t *guest_base,
         ProbeVertexDeclaration(guest_base, declaration);
     const RawDeclarationSample raw_declaration =
         CaptureRawDeclarationSample(guest_base, declaration);
-    REXLOG_INFO("Table Tennis E33 title gate sample: ordinal={} count={} "
-                "base={} topology={} stride={}/{} endian={}/{} index16={} "
-                "vb_bytes={} ib_bytes={} identity={} declaration={} "
-                "decl={:08X} eligible={} observer_only=true",
-                draw.ordinal, draw.submitted_index_count,
-                base_structure_matches, topology_matches,
-                draw.mesh.vertex_stride, VenueE33VertexPayload::kStride,
-                draw.mesh.vertex_endian, VenueE33VertexPayload::kEndian8In32,
-                index_layout_matches, draw.mesh.vertex_buffer_bytes,
-                draw.mesh.index_buffer_bytes, candidate.identity.valid(),
-                candidate.vertex_declaration.valid(),
-                draw.state.vertex_declaration, candidate.eligible);
-    REXLOG_INFO("  E33 declaration probe: address={:08X} raw_valid={} "
-                "raw=[{:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} "
-                "{:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X}] "
-                "valid={} failures={} count={} max_stream={} "
-                "masks={:016X}/{:016X} cache={:08X}",
-                declaration, raw_declaration.valid, raw_declaration.words[0],
-                raw_declaration.words[1], raw_declaration.words[2],
-                raw_declaration.words[3], raw_declaration.words[4],
-                raw_declaration.words[5], raw_declaration.words[6],
-                raw_declaration.words[7], raw_declaration.words[8],
-                raw_declaration.words[9], raw_declaration.words[10],
-                raw_declaration.words[11], raw_declaration.words[12],
-                raw_declaration.words[13], raw_declaration.words[14],
-                raw_declaration.words[15], declaration_probe.valid,
-                declaration_probe.copy_failures,
-                declaration_probe.element_count, declaration_probe.max_stream,
-                declaration_probe.stream_mask_lo,
-                declaration_probe.stream_mask_hi, declaration_probe.cache_id);
+    REXLOG_INFO(
+        "Table Tennis E33 title gate sample: ordinal={} count={} "
+        "base={} topology={} stride={}/{} endian={}/{} index16={} "
+        "vb_bytes={} ib_bytes={} identity={} declaration={} "
+        "decl={:08X} eligible={} observer_only=true",
+        draw.ordinal, draw.submitted_index_count, base_structure_matches,
+        topology_matches, draw.mesh.vertex_stride,
+        VenueE33VertexPayload::kStride, draw.mesh.vertex_endian,
+        VenueE33VertexPayload::kEndian8In32, index_layout_matches,
+        draw.mesh.vertex_buffer_bytes, draw.mesh.index_buffer_bytes,
+        candidate.identity.valid(), candidate.vertex_declaration.valid(),
+        draw.state.vertex_declaration, candidate.eligible);
+    REXLOG_INFO(
+        "  E33 declaration probe: address={:08X} raw_valid={} "
+        "raw=[{:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} "
+        "{:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X}] "
+        "valid={} failures={} count={} max_stream={} "
+        "masks={:016X}/{:016X} cache={:08X}",
+        declaration, raw_declaration.valid, raw_declaration.words[0],
+        raw_declaration.words[1], raw_declaration.words[2],
+        raw_declaration.words[3], raw_declaration.words[4],
+        raw_declaration.words[5], raw_declaration.words[6],
+        raw_declaration.words[7], raw_declaration.words[8],
+        raw_declaration.words[9], raw_declaration.words[10],
+        raw_declaration.words[11], raw_declaration.words[12],
+        raw_declaration.words[13], raw_declaration.words[14],
+        raw_declaration.words[15], declaration_probe.valid,
+        declaration_probe.copy_failures, declaration_probe.element_count,
+        declaration_probe.max_stream, declaration_probe.stream_mask_lo,
+        declaration_probe.stream_mask_hi, declaration_probe.cache_id);
     if (declaration_probe.valid) {
       for (uint32_t element_index = 0;
            element_index < declaration_probe.element_count; ++element_index) {
-        const VertexDeclarationElement &element =
+        const VertexDeclarationElement& element =
             declaration_probe.elements[element_index];
-        REXLOG_INFO("    E33 declaration element[{}]: stream={} offset={} "
-                    "type={:08X} format={} signed={} normalized={} method={} "
-                    "usage={} usage_index={} padding={}",
-                    element_index, element.stream, element.byte_offset,
-                    element.packed_type, element.format(), element.is_signed(),
-                    element.normalized(), element.method, element.usage,
-                    element.usage_index, element.unused_padding);
+        REXLOG_INFO(
+            "    E33 declaration element[{}]: stream={} offset={} "
+            "type={:08X} format={} signed={} normalized={} method={} "
+            "usage={} usage_index={} padding={}",
+            element_index, element.stream, element.byte_offset,
+            element.packed_type, element.format(), element.is_signed(),
+            element.normalized(), element.method, element.usage,
+            element.usage_index, element.unused_padding);
       }
     }
   }
   if (!candidate.eligible) {
     return;
   }
-  if (!candidate_capacity) {
+  if (!candidate_admitted) {
+    return;
+  }
+  if (!capture_planned) {
     return;
   }
 
   VenueE33TitleCapture capture =
       CaptureVenueE33TitleDraw(guest_base, draw, candidate);
-  auto token = std::make_shared<TitleToken>();
-  token->candidate = candidate;
+  std::lock_guard lock(g_observer_mutex);
+  if (g_learned_identity == nullptr ||
+      g_learned_identity->generation != token->capture_generation ||
+      g_building_frame.sequence != draw.frame_sequence) {
+    token->capture_generation_mismatches = 1;
+    if (g_building_frame.sequence == draw.frame_sequence) {
+      g_building_frame.capture_generation_mismatches = 1;
+    }
+    return;
+  }
   token->snapshot = std::move(capture.snapshot);
   token->guest_read_failures = capture.guest_read_failures;
   token->payload_copy_failures = capture.payload_copy_failures;
@@ -832,23 +1317,6 @@ void ObserveVenueE33TitleDraw(uint8_t *guest_base,
       capture.renderer_full_mip_texture_count;
   token->renderer_texture_shape_match_count =
       capture.renderer_texture_shape_match_count;
-
-  std::lock_guard lock(g_observer_mutex);
-  if (draw.frame_sequence == 0) {
-    ++g_building_frame.dropped_candidate_count;
-    return;
-  }
-  if (g_building_frame.sequence == 0) {
-    g_building_frame.sequence = draw.frame_sequence;
-  } else if (g_building_frame.sequence != draw.frame_sequence) {
-    ++g_building_frame.dropped_candidate_count;
-    return;
-  }
-  if (g_building_frame.candidates.size() == kMaximumTitleCandidates) {
-    ++g_building_frame.dropped_candidate_count;
-    return;
-  }
-  g_building_frame.candidates.push_back(token);
   g_telemetry.valid_title_snapshots += token->snapshot != nullptr;
   g_telemetry.title_guest_read_failures += token->guest_read_failures;
   g_telemetry.title_payload_copy_failures += token->payload_copy_failures;
@@ -859,11 +1327,10 @@ void ObserveVenueE33TitleDraw(uint8_t *guest_base,
       token->renderer_full_mip_texture_count;
   g_telemetry.title_renderer_texture_shape_matches +=
       token->renderer_texture_shape_match_count;
-  UpdatePendingCountsLocked();
 }
 
 void ObserveVenueE33BackendDraw(
-    const rex::graphics::NativeGuestDrawContext &context) {
+    const rex::graphics::NativeGuestDrawContext& context) {
   if (!VenueE33ObserverEnabled()) {
     return;
   }
@@ -917,6 +1384,10 @@ void ObserveVenueE33BackendDraw(
                 .primitive_type = context.primitive_type,
                 .submitted_index_count = context.guest_vertex_or_index_count,
                 .guest_index_base = context.guest_index_base,
+                .guest_vertex_base =
+                    context.primary_vertex_fetch.physical_address,
+                .guest_vertex_bytes = context.primary_vertex_fetch.byte_count,
+                .guest_vertex_endian = context.primary_vertex_fetch.endian,
             },
         .contract = CaptureBackendContract(context),
     };
@@ -950,6 +1421,8 @@ void VenueE33ObserverFrameEnd() {
     g_title_gate_sample_logs = 0;
     g_renderer_contract_logs = 0;
     g_selected_material_contract_logs = 0;
+    g_apply_pass_probe_claimed_generation = 0;
+    g_apply_pass_probe = {};
     return;
   }
 
@@ -983,4 +1456,4 @@ VenueE33ObserverTelemetry LatestVenueE33ObserverTelemetry() {
   return g_telemetry;
 }
 
-} // namespace tabletennis::native
+}  // namespace tabletennis::native

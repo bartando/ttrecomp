@@ -40,6 +40,16 @@ NativeScenePassTargetValidation ValidateNativeScenePassTargets(
     const rex::graphics::NativeGuestOutputRenderContext &context,
     const NativeScenePassTargets &targets);
 
+// Generic attachment-shape validator used by private target owners. The
+// existing custom scene path calls the fixed D32 wrapper above; translated
+// MAIN preparation supplies the exact captured packed depth/stencil format.
+NativeScenePassTargetValidation ValidateNativeScenePassTargetsExact(
+    const rex::graphics::NativeGuestOutputRenderContext &context,
+    const NativeScenePassTargets &targets,
+    rex::graphics::nrhi::Format expected_color_format,
+    rex::graphics::nrhi::Format expected_depth_format,
+    uint32_t expected_sample_count);
+
 const char *
 NativeScenePassTargetValidationName(NativeScenePassTargetValidation validation);
 

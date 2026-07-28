@@ -697,7 +697,7 @@ bool NetBB903FrameSnapshot::observer_complete() const {
 
 bool NetBB903ObserverEnabled() {
   return REXCVAR_GET(tabletennis_native_net_bb903_observer) ||
-         NativeFrameSceneCaptureEnabled();
+         NativeFrameSceneFullCaptureEnabled();
 }
 
 void ObserveNetBB903TitleDraw(

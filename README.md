@@ -222,7 +222,7 @@ menus playing at well above normal speed. `vsync = true` plus
 **Stutter when entering a new screen.** The SDK disables async shader
 compilation on macOS (`async_shader_compilation` defaults to
 `!REX_PLATFORM_MAC`), so every new pipeline is compiled on the frame that
-first needs it. `tabletennis.toml` turns it back on, which trades the stall
+first needs it. The app's baked defaults turn it back on, which trades the stall
 for brief pop-in while pipelines warm. If MoltenVK proves unstable with it,
 set it back to false - the default is presumably deliberate. `store_shaders`
 keeps compiled pipelines so later runs skip the warm-up.
@@ -230,8 +230,9 @@ keeps compiled pipelines so later runs skip the warm-up.
 **Rendering at 4x the pixels.** `resolution_scale` and
 `draw_resolution_scale_x/y` all default to 2 in the SDK, supersampling the
 1280x720 guest framebuffer to 2560x1440. The SDK itself warns that the path
-"is experimental and may not affect all titles correctly". `tabletennis.toml`
-sets them to 1. This is a large fragment-cost saving.
+"is experimental and may not affect all titles correctly". The app's baked
+defaults set them to 1: about 47-52 fps in gameplay versus 28 at 2x on the
+same machine.
 
 Beyond that, the frame rate is limited by this being the emulated Xenos
 renderer. Skate 3's ~10x uplift on Apple Silicon came from replacing that with

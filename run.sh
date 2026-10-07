@@ -15,6 +15,11 @@ for arg in "$@"; do
       ;;
   esac
 done
+# Dev checkouts keep extracted files in ./game; without them the app runs the
+# ISO install wizard.
+if [[ -f "$ROOT/game/default.xex" ]]; then
+  args=(--game_data_root="$ROOT/game" "${args[@]}")
+fi
 cp -f "$ROOT/tabletennis.toml" "$BUILD/" 2>/dev/null || true
 export DYLD_LIBRARY_PATH="$ROOT/third_party/rexglue-sdk/out/macos-arm64${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
 exec "$BUILD/tabletennis" "${args[@]}"

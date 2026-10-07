@@ -4,6 +4,9 @@
 
 cmake_minimum_required(VERSION 3.25)
 project(tabletennis LANGUAGES CXX)
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -94,7 +97,21 @@ set(TABLETENNIS_SOURCES
     src/native/tabletennis_scene_owner_observer.cpp
     src/native/tabletennis_vertex_declaration.cpp
     src/test/tabletennis_frontend_launch_test.cpp
+    src/tabletennis_iso_installer.cpp
 )
+
+if(APPLE)
+    list(APPEND TABLETENNIS_SOURCES src/tabletennis_macos.mm)
+
+    # The dock icon is set at runtime from the PNG bytes compiled into the exe.
+    set(TABLETENNIS_ICON_PNG "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon/tabletennis_icon.png")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${TABLETENNIS_ICON_PNG}")
+    file(READ "${TABLETENNIS_ICON_PNG}" icon_hex HEX)
+    string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," icon_bytes "${icon_hex}")
+    set(TABLETENNIS_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated_include")
+    file(WRITE "${TABLETENNIS_GENERATED_DIR}/tabletennis_icon_png.h"
+        "#pragma once\ninline constexpr unsigned char kTabletennisIconPng[] = {${icon_bytes}};\n")
+endif()
 
 if(WIN32)
     add_executable(tabletennis WIN32 ${TABLETENNIS_SOURCES})
@@ -103,6 +120,11 @@ else()
 endif()
 
 rexglue_setup_target(tabletennis)
+
+if(APPLE)
+    target_include_directories(tabletennis PRIVATE "${TABLETENNIS_GENERATED_DIR}")
+    target_link_libraries(tabletennis PRIVATE "-framework Cocoa" "-framework UniformTypeIdentifiers")
+endif()
 
 # GPU frame trace viewer. The SDK contains the shared trace reader/player UI,
 # but doesn't expose an executable target for it.

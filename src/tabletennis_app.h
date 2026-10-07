@@ -11,7 +11,14 @@
 
 #include "generated/default/tabletennis_init.h"
 #include "native/tabletennis_native_renderer.h"
+#include "tabletennis_iso_installer.h"
 #include "test/tabletennis_frontend_launch_test.h"
+
+#if defined(__APPLE__)
+namespace tabletennis {
+void SetDockIconMacOS();
+}
+#endif
 
 class TabletennisApp : public rex::ReXApp {
  public:
@@ -21,6 +28,15 @@ class TabletennisApp : public rex::ReXApp {
       rex::ui::WindowedAppContext& ctx) {
     return std::unique_ptr<TabletennisApp>(new TabletennisApp(ctx, "tabletennis",
         tabletennis_PPCImageConfig));
+  }
+
+  std::optional<rex::PathConfig> OnFinalizePaths(
+      const rex::PathConfig& defaults,
+      std::function<void(rex::PathConfig)> resume) override {
+#if defined(__APPLE__)
+    tabletennis::SetDockIconMacOS();
+#endif
+    return tabletennis::FinalizeGamePaths(defaults, imgui_drawer(), std::move(resume));
   }
 
   void OnPostSetup() override {

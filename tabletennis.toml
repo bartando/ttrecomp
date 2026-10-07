@@ -3,7 +3,8 @@
 # The app loads "<exe dir>/tabletennis.toml", so this file has to sit next to
 # the executable - copy it into out/build/<preset>/ after building.
 
-game_data_root = "game"
+# Game files come from your own ISO: on first launch the app asks for it and
+# extracts it to "<exe dir>/game". Set game_data_root to use files elsewhere.
 
 # macOS always uses the SDL backend; real controllers work through it as-is.
 input_backend = "sdl"

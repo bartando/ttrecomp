@@ -70,6 +70,12 @@ python3 tools/xdvdfs_extract.py thegame.iso game --only /default.xex
 python3 tools/xdvdfs_extract.py thegame.iso game
 ```
 
+The app can also install the game files itself: launched without them, it
+shows a setup screen that asks for your ISO, checks it's Table Tennis (title
+ID `545407DF`) and extracts it to `game/` next to the executable. Setting
+`TABLETENNIS_INSTALL_ISO=/path/to.iso` does the same without the UI. The file
+picker is macOS-only for now.
+
 ## Building the SDK
 
 macOS (Apple Silicon), with Homebrew LLVM - Apple Clang is not supported:

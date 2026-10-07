@@ -5,8 +5,8 @@
 
 namespace tabletennis {
 
-// Applies the defaults to every cvar still at its SDK default, so command-line
-// flags win over them, and a tabletennis.toml (loaded later) wins over both.
+// Replaces the SDK defaults, so command-line flags and a tabletennis.toml
+// (loaded later) still win, and saved settings equal to these stay saved.
 void ApplyAppDefaults();
 
 }  // namespace tabletennis

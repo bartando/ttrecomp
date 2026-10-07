@@ -24,16 +24,17 @@ constexpr Default kDefaults[] = {
     // Playable without a controller.
     {"mnk_mode", "true"},
     {"fullscreen", "false"},
+    // The SDK supersamples at 2x2, which costs gameplay its 60 fps here.
+    {"resolution_scale", "1"},
+    {"draw_resolution_scale_x", "1"},
+    {"draw_resolution_scale_y", "1"},
 };
 
 }  // namespace
 
 void ApplyAppDefaults() {
   for (const Default& entry : kDefaults) {
-    if (rex::cvar::HasNonDefaultValue(entry.name)) {
-      continue;
-    }
-    if (!rex::cvar::SetFlagByName(entry.name, entry.value)) {
+    if (!rex::cvar::SetDefaultValue(entry.name, entry.value)) {
       REXLOG_WARN("Could not apply app default {}={}", entry.name, entry.value);
     }
   }

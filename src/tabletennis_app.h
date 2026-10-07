@@ -11,6 +11,7 @@
 
 #include "generated/default/tabletennis_init.h"
 #include "native/tabletennis_native_renderer.h"
+#include "tabletennis_defaults.h"
 #include "tabletennis_iso_installer.h"
 #include "test/tabletennis_frontend_launch_test.h"
 
@@ -26,6 +27,7 @@ class TabletennisApp : public rex::ReXApp {
 
   static std::unique_ptr<rex::ui::WindowedApp> Create(
       rex::ui::WindowedAppContext& ctx) {
+    tabletennis::ApplyAppDefaults();
     return std::unique_ptr<TabletennisApp>(new TabletennisApp(ctx, "tabletennis",
         tabletennis_PPCImageConfig));
   }

@@ -3,13 +3,22 @@
 # SDK boilerplate lives in generated/rexglue.cmake.
 
 cmake_minimum_required(VERSION 3.25)
-project(tabletennis LANGUAGES CXX)
+project(tabletennis VERSION 0.1.0 LANGUAGES CXX)
 if(APPLE)
     enable_language(OBJCXX)
+elseif(WIN32)
+    enable_language(RC)
 endif()
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Keep the checkout's absolute path (and with it the builder's user name) out
+# of __FILE__ strings and debug info. Set before the SDK is added so it covers
+# the runtime library too.
+add_compile_options(
+    "$<$<COMPILE_LANGUAGE:C,CXX,OBJCXX>:-ffile-prefix-map=${CMAKE_SOURCE_DIR}=.>"
+    "$<$<COMPILE_LANGUAGE:C,CXX,OBJCXX>:-ffile-prefix-map=${CMAKE_BINARY_DIR}=build>")
 
 include(generated/rexglue.cmake)
 
@@ -97,6 +106,7 @@ set(TABLETENNIS_SOURCES
     src/native/tabletennis_scene_owner_observer.cpp
     src/native/tabletennis_vertex_declaration.cpp
     src/test/tabletennis_frontend_launch_test.cpp
+    src/tabletennis_defaults.cpp
     src/tabletennis_iso_installer.cpp
 )
 
@@ -114,7 +124,12 @@ if(APPLE)
 endif()
 
 if(WIN32)
-    add_executable(tabletennis WIN32 ${TABLETENNIS_SOURCES})
+    set(TABLETENNIS_ICON_ICO "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon/tabletennis_icon.ico")
+    set(TABLETENNIS_RC_VERSION
+        "${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0")
+    configure_file(src/tabletennis.rc.in "${CMAKE_CURRENT_BINARY_DIR}/tabletennis.rc" @ONLY)
+    add_executable(tabletennis WIN32 ${TABLETENNIS_SOURCES}
+        "${CMAKE_CURRENT_BINARY_DIR}/tabletennis.rc")
 else()
     add_executable(tabletennis ${TABLETENNIS_SOURCES})
 endif()
@@ -124,6 +139,9 @@ rexglue_setup_target(tabletennis)
 if(APPLE)
     target_include_directories(tabletennis PRIVATE "${TABLETENNIS_GENERATED_DIR}")
     target_link_libraries(tabletennis PRIVATE "-framework Cocoa" "-framework UniformTypeIdentifiers")
+endif()
+if(WIN32)
+    target_link_libraries(tabletennis PRIVATE comdlg32)
 endif()
 
 # GPU frame trace viewer. The SDK contains the shared trace reader/player UI,

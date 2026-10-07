@@ -19,6 +19,11 @@
 #include <rex/logging.h>
 #include <rex/ui/overlay/install_wizard_overlay.h>
 
+#if defined(_WIN32)
+#include <windows.h>
+#include <commdlg.h>
+#endif
+
 namespace tabletennis {
 
 #if defined(__APPLE__)
@@ -306,10 +311,25 @@ class XboxIsoReader {
 std::filesystem::path PickIsoFile() {
 #if defined(__APPLE__)
   return PickIsoFileMacOS();
+#elif defined(_WIN32)
+  wchar_t filename[MAX_PATH] = {};
+  OPENFILENAMEW ofn{};
+  ofn.lStructSize = sizeof(ofn);
+  ofn.hwndOwner = GetActiveWindow();
+  ofn.lpstrFile = filename;
+  ofn.nMaxFile = static_cast<DWORD>(std::size(filename));
+  ofn.lpstrFilter = L"Xbox 360 ISO (*.iso)\0*.iso\0All files (*.*)\0*.*\0";
+  ofn.lpstrTitle = L"Select your Table Tennis Xbox 360 ISO";
+  ofn.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR |
+              OFN_DONTADDTORECENT;
+  if (!GetOpenFileNameW(&ofn)) {
+    return {};
+  }
+  return filename;
 #else
   REXLOG_ERROR(
-      "The ISO picker is only implemented on macOS. Set TABLETENNIS_INSTALL_ISO to the ISO "
-      "path, or game_data_root to an extracted copy of the game.");
+      "The ISO picker is only implemented on macOS and Windows. Set TABLETENNIS_INSTALL_ISO to "
+      "the ISO path, or game_data_root to an extracted copy of the game.");
   return {};
 #endif
 }
@@ -408,13 +428,25 @@ std::optional<rex::PathConfig> FinalizeGamePaths(const rex::PathConfig& defaults
   REXLOG_INFO("Game files not found at {}; showing the ISO installer",
               paths.game_data_root.string());
   const auto game_root = paths.game_data_root;
+  // macOS runs a quarantined app that was never moved from a randomized
+  // read-only mount, so nothing could be installed next to it.
+  const bool translocated = game_root.string().find("/AppTranslocation/") != std::string::npos;
+  const char* intro =
+      translocated
+          ? "macOS is running this app from a temporary read-only location, so the game files "
+            "can't be installed next to it. Quit, move the app into another folder (dragging "
+            "it in Finder is enough), and open it again."
+          : "Table Tennis game files were not found. Select your own Xbox 360 ISO of Rockstar "
+            "Games presents Table Tennis to install them.";
   new rex::ui::InstallWizardDialog(
-      drawer, "Setup", "Game Files",
-      "Table Tennis game files were not found. Select your own Xbox 360 ISO of Rockstar "
-      "Games presents Table Tennis to install them.",
-      game_root.string(), [] { return PickIsoFile(); },
-      [game_root](const std::filesystem::path& source, std::atomic<uint64_t>& copied_bytes,
-                  std::atomic<uint64_t>& total_bytes, std::string& error) {
+      drawer, "Setup", "Game Files", intro, game_root.string(), [] { return PickIsoFile(); },
+      [game_root, translocated](const std::filesystem::path& source,
+                                std::atomic<uint64_t>& copied_bytes,
+                                std::atomic<uint64_t>& total_bytes, std::string& error) {
+        if (translocated) {
+          error = "Move the app out of its temporary location first, then open it again.";
+          return false;
+        }
         return InstallFromIso(source, game_root, copied_bytes, total_bytes, error);
       },
       [paths, resume = std::move(resume)]() mutable { resume(std::move(paths)); });

@@ -11,6 +11,52 @@ controller input available. Full-match compatibility is still untested.
 This project contains no retail game code or assets. To build or run it you
 must supply files from your own legally obtained copy of the game.
 
+Fan-made and unofficial. Not affiliated with or endorsed by Rockstar Games or
+Take-Two Interactive.
+
+## How do I play?
+
+The release zips contain only the recompiled program. On first launch it asks
+for your own Xbox 360 ISO of the game and extracts the files it needs next to
+the app.
+
+### Windows
+
+1. Extract `TableTennisRecomp-Windows.zip` into a folder you control.
+2. Run `tabletennis.exe`.
+3. Click "Select ISO", pick your ISO, and wait for the install to finish.
+4. Click "Start Game".
+
+### macOS (Apple Silicon)
+
+1. Extract `TableTennisRecomp-macOS.zip` into a folder you control (not
+   Downloads or Applications). Game files, saves, settings and logs live in
+   the folder containing the app.
+2. Move the app into that folder with Finder. If macOS still runs it from its
+   quarantine location, the installer says so.
+3. The first time, right-click the app and choose Open, or allow it under
+   System Settings > Privacy & Security. The app is ad-hoc signed, not
+   notarized.
+4. Click "Select ISO", pick your ISO, and wait for the install to finish.
+5. Click "Start Game".
+
+Settings go in `tabletennis.toml` next to the app (see the one in this repo
+for the common ones). Without it, the built-in defaults apply.
+
+## Packaging a release
+
+Build the release preset, then:
+
+- macOS: `tools/package_macos.sh out/build/macos-arm64-release` writes
+  `out/package/TableTennisRecomp-macOS.zip`. The minimum macOS version follows
+  the Vulkan loader you build against. Homebrew's needs macOS 15, and the
+  LunarG SDK's (`VULKAN_SDK`) goes lower.
+- Windows: `tools/package_windows.ps1 -Build out/build/win-amd64-release`
+  writes `out/package/TableTennisRecomp-Windows.zip`.
+
+Both scripts refuse to package a binary that still contains the builder's home
+directory path.
+
 ## Approach
 
 This is static recompilation, not emulation. The game's PowerPC executable

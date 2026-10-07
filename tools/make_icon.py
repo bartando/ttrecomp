@@ -2,7 +2,8 @@
 """Draws the app icon: a paddle and ball on a table-green tile.
 
 Original artwork, deliberately not based on the game's own icon. Writes
-assets/icon/tabletennis_icon.png (1024x1024); needs Pillow.
+assets/icon/tabletennis_icon.png (1024x1024) and the Windows
+assets/icon/tabletennis_icon.ico; needs Pillow.
 """
 
 import math
@@ -131,7 +132,10 @@ def main():
     icon = icon.resize((SIZE, SIZE), Image.LANCZOS)
     OUT.parent.mkdir(parents=True, exist_ok=True)
     icon.save(OUT)
+    ico = OUT.with_suffix(".ico")
+    icon.save(ico, sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
     print(OUT)
+    print(ico)
 
 
 if __name__ == "__main__":

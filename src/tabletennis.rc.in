@@ -1,0 +1,31 @@
+MAINICON ICON "@TABLETENNIS_ICON_ICO@"
+
+1 VERSIONINFO
+ FILEVERSION @TABLETENNIS_RC_VERSION@
+ PRODUCTVERSION @TABLETENNIS_RC_VERSION@
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "TableTennisRecomp project"
+            VALUE "FileDescription", "TableTennisRecomp"
+            VALUE "FileVersion", "@PROJECT_VERSION@"
+            VALUE "InternalName", "tabletennis"
+            VALUE "LegalCopyright", "(c) TableTennisRecomp contributors"
+            VALUE "OriginalFilename", "tabletennis.exe"
+            VALUE "ProductName", "TableTennisRecomp"
+            VALUE "ProductVersion", "@PROJECT_VERSION@"
+            VALUE "Comments", "Fan-made recompilation. Not affiliated with or endorsed by Rockstar Games or Take-Two Interactive."
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

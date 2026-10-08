@@ -20,7 +20,7 @@ target_include_directories(tabletennis-ps5 PRIVATE
     "${REXGLUE_PS5_GAME_SOURCE}/src"
     "${REXGLUE_PS5_GAME_SOURCE}/generated/default"
 )
-target_link_libraries(tabletennis-ps5 PRIVATE rex::runtime)
+target_link_libraries(tabletennis-ps5 PRIVATE rex::runtime rex::ui imgui::imgui)
 if(NOT TABLETENNIS_PS5_NATIVE_HOOKS)
     target_compile_definitions(tabletennis-ps5 PRIVATE TABLETENNIS_PS5_NO_NATIVE_HOOKS=1)
 endif()

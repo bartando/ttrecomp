@@ -7,7 +7,10 @@
 //
 //   cross, circle, square, triangle -> A, B, X, Y
 //   L1, R1 -> shoulders          L2, R2 -> triggers (analogue)
-//   L3, R3 -> stick clicks       OPTIONS -> START      touchpad click -> BACK
+//   L3, R3 -> stick clicks       OPTIONS -> START
+//
+// The touchpad click belongs to the title's settings menu (settings_menu.h),
+// which takes the whole pad while it is open.
 //
 // Only the start of the pad state is read (buttons, sticks, triggers), which
 // has the same layout on PS4 and PS5; the buffer handed to scePadReadState is
@@ -21,6 +24,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <mutex>
 #include <vector>
 
@@ -75,6 +79,23 @@ class Ps5PadInputDriver final : public rex::input::InputDriver {
     return handle_ >= 0 ? X_STATUS_SUCCESS : X_STATUS_UNSUCCESSFUL;
   }
 
+  // Off: the game's rumble requests are dropped and the motors stopped.
+  void SetRumbleEnabled(bool enabled) {
+    rumble_enabled_.store(enabled, std::memory_order_relaxed);
+    if (!enabled && handle_ >= 0) {
+      const uint8_t off[2] = {0, 0};
+      scePadSetVibration(handle_, off);
+    }
+  }
+
+  // Sees the raw buttons of every read; returning true hides them from the game.
+  void SetMenuInput(std::function<bool(uint32_t)> menu_input) {
+    menu_input_ = std::move(menu_input);
+  }
+
+  // Held buttons added to the real ones, for unattended tests.
+  void InjectButtons(uint32_t buttons) { injected_buttons_.store(buttons); }
+
   rex::X_RESULT GetCapabilities(uint32_t user_index, uint32_t flags,
                                  rex::input::X_INPUT_CAPABILITIES* out_caps) override {
     (void)flags;
@@ -118,8 +139,14 @@ class Ps5PadInputDriver final : public rex::input::InputDriver {
 
     uint32_t pad_buttons;
     std::memcpy(&pad_buttons, data, sizeof pad_buttons);
-    const uint8_t left_x = data[4], left_y = data[5], right_x = data[6], right_y = data[7];
-    const uint8_t l2 = data[8], r2 = data[9];
+    pad_buttons |= injected_buttons_.load(std::memory_order_relaxed);
+    uint8_t left_x = data[4], left_y = data[5], right_x = data[6], right_y = data[7];
+    uint8_t l2 = data[8], r2 = data[9];
+    if (menu_input_ && menu_input_(pad_buttons)) {
+      pad_buttons = 0;
+      left_x = left_y = right_x = right_y = 128;
+      l2 = r2 = 0;
+    }
 
     uint16_t buttons = 0;
     const auto map = [&](uint32_t pad_bit, uint16_t xinput_bit) {
@@ -130,7 +157,6 @@ class Ps5PadInputDriver final : public rex::input::InputDriver {
     map(0x00000080, rex::input::X_INPUT_GAMEPAD_DPAD_LEFT);
     map(0x00000020, rex::input::X_INPUT_GAMEPAD_DPAD_RIGHT);
     map(0x00000008, rex::input::X_INPUT_GAMEPAD_START);          // OPTIONS
-    map(0x00100000, rex::input::X_INPUT_GAMEPAD_BACK);           // touchpad click
     map(0x00000002, rex::input::X_INPUT_GAMEPAD_LEFT_THUMB);     // L3
     map(0x00000004, rex::input::X_INPUT_GAMEPAD_RIGHT_THUMB);    // R3
     map(0x00000400, rex::input::X_INPUT_GAMEPAD_LEFT_SHOULDER);  // L1
@@ -183,7 +209,7 @@ class Ps5PadInputDriver final : public rex::input::InputDriver {
   rex::X_RESULT SetState(uint32_t user_index,
                               rex::input::X_INPUT_VIBRATION* vibration) override {
     if (user_index != 0 || handle_ < 0) return X_ERROR_DEVICE_NOT_CONNECTED;
-    if (vibration) {
+    if (vibration && rumble_enabled_.load(std::memory_order_relaxed)) {
       // { large motor, small motor }, 0..255 each.
       const uint8_t param[2] = {
           static_cast<uint8_t>(static_cast<uint16_t>(vibration->left_motor_speed) >> 8),
@@ -222,6 +248,9 @@ class Ps5PadInputDriver final : public rex::input::InputDriver {
   int user_id_ = -1;
   int vibration_mode_ = -1;
   uint64_t vibration_calls_ = 0;
+  std::atomic<bool> rumble_enabled_{true};
+  std::function<bool(uint32_t)> menu_input_;
+  std::atomic<uint32_t> injected_buttons_{0};
   std::mutex mutex_;
   State last_state_;
   uint32_t packet_number_ = 0;

@@ -5,6 +5,7 @@
 #include "capture.h"
 #include "pad_input.h"
 #include "log.h"
+#include "settings_menu.h"
 #include "tabletennis_defaults.h"
 #include "native/tabletennis_native_renderer.h"
 #include "test/tabletennis_frontend_launch_test.h"
@@ -21,11 +22,16 @@
 #include <rex/runtime.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xthread.h>
+#include <rex/ui/imgui_drawer.h>
+#include <rex/ui/immediate_drawer.h>
 #include <rex/ui/window.h>
 #include <rex/ui/windowed_app_context_sdl.h>
 
 #include <SDL3/SDL.h>
+#include <chrono>
 #include <cstdio>
+#include <sstream>
+#include <thread>
 #include <filesystem>
 #include <fcntl.h>
 #include <pthread.h>
@@ -43,16 +49,44 @@ REXCVAR_DEFINE_INT32(ps5_display_height, 2160, "PS5", "Display mode height");
 REXCVAR_DEFINE_INT32(ps5_pad_vibration_mode, 2, "PS5",
                      "scePadSetVibrationMode value at pad open: 2 = classic rumble, "
                      "1 = audio haptics (the default, which ignores rumble), -1 = leave it");
+REXCVAR_DEFINE_BOOL(ps5_pad_rumble, true, "PS5", "Controller rumble");
 REXCVAR_DEFINE_INT32(ps5_capture_start_s, 0, "PS5",
                      "Seconds after launch to start capturing the guest output into "
                      "/app0/cap (0: never)");
 REXCVAR_DEFINE_INT32(ps5_capture_count, 30, "PS5", "Guest output frames to capture");
 REXCVAR_DEFINE_INT32(ps5_capture_interval_ms, 100, "PS5", "Time between captured frames");
+REXCVAR_DEFINE_BOOL(ps5_capture_final, false, "PS5",
+                    "Capture the presented frame, overlays included, instead of the guest "
+                    "output");
+REXCVAR_DEFINE_BOOL(ps5_show_fps, false, "PS5", "FPS counter (settings menu)");
+REXCVAR_DEFINE_STRING(ps5_pad_test_script, "", "PS5",
+                      "Unattended pad presses, `seconds:buttons` pairs (scePad bits, hex) "
+                      "separated by commas, e.g. 40:100000,42:40");
 
 namespace {
 using tabletennis::ps5::Line;
 using tabletennis::ps5::Print;
 int crash_log = -1;
+
+// Presses each scripted button set for 150 ms at its time after launch.
+void StartPadTestScript(Ps5PadInputDriver* pad, std::string script) {
+  std::thread([pad, script] {
+    const auto start = std::chrono::steady_clock::now();
+    std::stringstream entries(script);
+    std::string entry;
+    while (std::getline(entries, entry, ',')) {
+      const auto colon = entry.find(':');
+      if (colon == std::string::npos) continue;
+      const double seconds = std::stod(entry.substr(0, colon));
+      const uint32_t buttons = uint32_t(std::stoul(entry.substr(colon + 1), nullptr, 16));
+      std::this_thread::sleep_until(start + std::chrono::milliseconds(int64_t(seconds * 1000)));
+      Print("Pad test script: %.1f s buttons 0x%x\n", seconds, unsigned(buttons));
+      pad->InjectButtons(buttons);
+      std::this_thread::sleep_for(std::chrono::milliseconds(150));
+      pad->InjectButtons(0);
+    }
+  }).detach();
+}
 
 void crash_hex(const char* label, uint64_t value) {
   char message[128];
@@ -165,7 +199,12 @@ int run_game() {
   rex::InitLogging(logging);
   // Optional cvar overrides (flat `name = value` TOML), editable over FTP so
   // diagnostics can be toggled without a rebuild.
+  // The settings menu's choices, then development overrides.
+  rex::cvar::LoadConfig(root / "settings.toml");
   rex::cvar::LoadConfig(root / "ps5.toml");
+  if (REXCVAR_GET(ps5_capture_final)) {
+    rex::cvar::SetFlagByName("present_final_output_capture", "true");
+  }
   Line("NEXT: SDL offscreen context and native Vulkan presentation");
   SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen");
   if (!SDL_Init(SDL_INIT_VIDEO)) { Print("FAIL: SDL_Init: %s\n", SDL_GetError()); return 1; }
@@ -185,18 +224,36 @@ int run_game() {
     tabletennis::ps5::StartGuestOutputCapture(graphics->presenter(), "/app0/cap",
                                               REXCVAR_GET(ps5_capture_start_s),
                                               REXCVAR_GET(ps5_capture_count),
-                                              REXCVAR_GET(ps5_capture_interval_ms));
+                                              REXCVAR_GET(ps5_capture_interval_ms),
+                                              REXCVAR_GET(ps5_capture_final));
   }
+  // The settings menu draws with ImGui over the game; like the window, it
+  // lives until the system closes the title.
+  static tabletennis::ps5::MenuFonts menu_fonts;
+  auto* immediate_drawer = graphics->provider()->CreateImmediateDrawer().release();
+  immediate_drawer->SetPresenter(graphics->presenter());
+  auto* imgui_drawer = new rex::ui::ImGuiDrawer(
+      window, 64, [](ImFontAtlas* atlas) { tabletennis::ps5::AddSystemFonts(atlas, menu_fonts); });
+  imgui_drawer->SetPresenterAndImmediateDrawer(graphics->presenter(), immediate_drawer);
+  auto* menu = new tabletennis::ps5::SettingsMenu(*context, *imgui_drawer, *graphics->presenter(),
+                                                  menu_fonts, root / "settings.toml");
   auto* runtime = new rex::Runtime(root / "game", root / "user", {}, root / "cache");
   runtime->set_app_context(context);
   runtime->set_display_window(window);
   rex::RuntimeConfig config;
   config.graphics = std::move(graphics);
   config.kernel_init = rex::kernel::InitializeKernel;
-  config.input_factory = [](bool) -> std::unique_ptr<rex::system::IInputSystem> {
+  config.input_factory = [menu](bool) -> std::unique_ptr<rex::system::IInputSystem> {
     auto input = std::make_unique<rex::input::InputSystem>(nullptr);
     auto pad = std::make_unique<Ps5PadInputDriver>(REXCVAR_GET(ps5_pad_vibration_mode));
     if (XFAILED(pad->Setup())) return nullptr;
+    pad->SetRumbleEnabled(REXCVAR_GET(ps5_pad_rumble));
+    pad->SetMenuInput([menu](uint32_t buttons) { return menu->OnPadButtons(buttons); });
+    Ps5PadInputDriver* driver = pad.get();
+    menu->SetRumbleSink([driver](bool enabled) { driver->SetRumbleEnabled(enabled); });
+    if (!REXCVAR_GET(ps5_pad_test_script).empty()) {
+      StartPadTestScript(driver, REXCVAR_GET(ps5_pad_test_script));
+    }
     input->AddDriver(std::move(pad));
     return input;
   };

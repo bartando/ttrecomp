@@ -68,6 +68,20 @@ FTP's SELF unwrapping, allowing only the service's known clearing of
 `upload_game.py` uploads/resumes an extracted game folder and checks the XEX on
 readback.
 
+## Settings menu
+
+The touchpad click opens the title's own menu (`game/settings_menu.h`), drawn
+with ImGui over the game. It sets the upscaler (FSR 1 or bilinear, live), the
+render resolution (720p or 1440p, next launch), an FPS counter and controller
+rumble. Choices go to `/app0/ttrecomp/settings.toml`, loaded after the host's
+defaults and before `ps5.toml`. While the menu is open the game sees an idle
+pad. The touchpad no longer sends Xbox Back; nothing in the game was found to
+use it.
+
+For unattended checks, `ps5_pad_test_script` presses buttons on a timeline,
+and `ps5_capture_final` makes the capture cvars grab the presented frame,
+overlays included. `run_match.py` turns rumble off unless `--rumble` is given.
+
 ## Installing for players
 
 `install_ps5.py` is the player-facing installer: it takes the user's Xbox 360

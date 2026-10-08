@@ -38,9 +38,11 @@ inline bool WriteHalfSizePpm(const std::filesystem::path& path, const rex::ui::R
 }
 
 // From start_s after launch, captures count frames interval_ms apart into
-// dir/NNN.ppm.
+// dir/NNN.ppm: the game's output, or with final_output the presented frame
+// including overlays.
 inline void StartGuestOutputCapture(rex::ui::Presenter* presenter, std::filesystem::path dir,
-                                    int start_s, int count, int interval_ms) {
+                                    int start_s, int count, int interval_ms,
+                                    bool final_output) {
   std::thread([=] {
     std::error_code error;
     std::filesystem::create_directories(dir, error);
@@ -50,7 +52,9 @@ inline void StartGuestOutputCapture(rex::ui::Presenter* presenter, std::filesyst
       rex::ui::RawImage image;
       char name[16];
       std::snprintf(name, sizeof(name), "%03d.ppm", i);
-      if (presenter->CaptureGuestOutput(image) && WriteHalfSizePpm(dir / name, image)) ++written;
+      const bool captured = final_output ? presenter->CaptureFinalOutput(image)
+                                         : presenter->CaptureGuestOutput(image);
+      if (captured && WriteHalfSizePpm(dir / name, image)) ++written;
       std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
     }
     Print("Guest output capture: %d of %d frames in %s\n", written, count, dir.c_str());

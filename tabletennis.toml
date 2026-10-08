@@ -60,14 +60,13 @@ vblank_host_clock_pacing = true
 video_mode_refresh_rate = 60.0
 
 # --- Shader compilation -----------------------------------------------------
-# The SDK disables async shader compilation on macOS (`!REX_PLATFORM_MAC`), so
-# every new pipeline is built on the frame that first needs it - the stutter
-# when entering a new screen. Turning it on trades that for brief pop-in while
-# pipelines warm up. If it introduces instability under MoltenVK, set it back
-# to false: the default is presumably deliberate.
+# New pipelines can compile on worker threads with temporary placeholder
+# draws. Submission still waits for compilation to finish, so this setting
+# alone doesn't eliminate first-use stutters.
 async_shader_compilation = true
 
-# Persist compiled shaders so subsequent runs skip the warm-up entirely.
+# Save shader/pipeline descriptions and precompile known pipelines at startup.
+# A newly encountered pipeline can still compile during its first play session.
 store_shaders = true
 
 # --- Draw resolution --------------------------------------------------------

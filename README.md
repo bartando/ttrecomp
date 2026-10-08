@@ -43,6 +43,11 @@ the app.
 Settings go in `tabletennis.toml` next to the app (see the one in this repo
 for the common ones). Without it, the built-in defaults apply.
 
+With `store_shaders = true` (the default), known Vulkan pipelines are compiled
+before gameplay starts. This adds a short startup delay and avoids compiling
+those pipelines again during play. A pipeline encountered for the first time
+can still cause a stutter; it is saved for the next launch.
+
 On macOS (Vulkan), normal play sessions automatically record stutter diagnostics in
 `logs/tabletennis_NNN.log` next to the app. `PERF hitch` entries report guest
 swap intervals over 25 ms, pipeline compilation, GPU fence waits, guest file
@@ -239,10 +244,18 @@ menus playing at well above normal speed. `vsync = true` plus
 **Stutter when entering a new screen.** The SDK disables async shader
 compilation on macOS (`async_shader_compilation` defaults to
 `!REX_PLATFORM_MAC`), so every new pipeline is compiled on the frame that
-first needs it. The app's baked defaults turn it back on, which trades the stall
-for brief pop-in while pipelines warm. If MoltenVK proves unstable with it,
-set it back to false - the default is presumably deliberate. `store_shaders`
-keeps compiled pipelines so later runs skip the warm-up.
+first needs it. The app's baked defaults turn it back on, allowing temporary
+placeholder draws while worker threads compile pipelines. Submission still
+waits for compilation, so async compilation alone does not remove first-use
+stutters. `store_shaders`
+keeps guest shaders and pipeline descriptions, which are used to precompile
+previously seen pipelines at startup. Both cache streams explicitly seek to
+the beginning before loading: macOS starts `a+b` streams at EOF, which previously
+made valid caches look empty and caused them to be rewritten on each launch.
+The storage writer also flushes pending records before sleeping, so the latest
+batch does not remain buffered while the game is otherwise idle.
+Precompiling moves that work into startup; a pipeline encountered for the first
+time can still require compilation during play.
 
 **Rendering at 4x the pixels.** `resolution_scale` and
 `draw_resolution_scale_x/y` all default to 2 in the SDK, supersampling the

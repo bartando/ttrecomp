@@ -63,9 +63,9 @@ sed 's|"library_path": *"[^"]*"|"library_path": "../../../MacOS/libMoltenVK.dyli
 ICONSET="$OUT/$NAME.iconset"
 rm -rf "$ICONSET" && mkdir -p "$ICONSET"
 for size in 16 32 128 256 512; do
-  sips -z $size $size "$ROOT/assets/icon/tabletennis_icon.png" \
+  sips -z $size $size "$ROOT/assets/icon/tabletennis_icon_vivid.png" \
     --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
-  sips -z $((size * 2)) $((size * 2)) "$ROOT/assets/icon/tabletennis_icon.png" \
+  sips -z $((size * 2)) $((size * 2)) "$ROOT/assets/icon/tabletennis_icon_vivid.png" \
     --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/$NAME.icns"

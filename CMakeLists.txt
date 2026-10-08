@@ -115,7 +115,7 @@ if(APPLE)
     list(APPEND TABLETENNIS_SOURCES src/tabletennis_macos.mm)
 
     # The dock icon is set at runtime from the PNG bytes compiled into the exe.
-    set(TABLETENNIS_ICON_PNG "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon/tabletennis_icon.png")
+    set(TABLETENNIS_ICON_PNG "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon/tabletennis_icon_vivid.png")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${TABLETENNIS_ICON_PNG}")
     file(READ "${TABLETENNIS_ICON_PNG}" icon_hex HEX)
     string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," icon_bytes "${icon_hex}")
@@ -125,7 +125,7 @@ if(APPLE)
 endif()
 
 if(WIN32)
-    set(TABLETENNIS_ICON_ICO "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon/tabletennis_icon.ico")
+    set(TABLETENNIS_ICON_ICO "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon/tabletennis_icon_vivid.ico")
     set(TABLETENNIS_RC_VERSION
         "${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0")
     configure_file(src/tabletennis.rc.in "${CMAKE_CURRENT_BINARY_DIR}/tabletennis.rc" @ONLY)

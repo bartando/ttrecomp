@@ -29,21 +29,27 @@ the app.
 
 ### macOS (Apple Silicon)
 
-1. Open `TableTennisRecomp-macOS.dmg` and drag the app into a folder you control,
-   such as `~/Games/Table Tennis Recomp`, then eject the disk image. If using
-   the ZIP instead, extract it and move the app into that folder. Game files,
-   settings and logs live beside the app; saves and shader caches use your
-   user-data directory. Avoid Downloads and Applications.
-2. Launch the copied app. If macOS still runs it from its
-   quarantine location, the installer says so.
+1. Open `TableTennisRecomp-macOS.dmg`, drag the app onto the Applications
+   shortcut, then eject the disk image. If using the ZIP instead, extract it
+   and drag the app into Applications.
+2. Open TableTennisRecomp from Applications.
 3. The first time, right-click the app and choose Open, or allow it under
    System Settings > Privacy & Security. The app is ad-hoc signed, not
    notarized.
 4. Click "Select ISO", pick your ISO, and wait for the install to finish.
 5. Click "Start Game".
 
-Settings go in `tabletennis.toml` next to the app (see the one in this repo
-for the common ones). Without it, the built-in defaults apply.
+The macOS bundle keeps game files, settings, logs, saves and shader caches in
+`~/.local/share/tabletennis/` (or `$XDG_DATA_HOME/tabletennis/` when set).
+Replacing or moving the app does not remove them. Settings go in
+`tabletennis.toml` there; without it, the built-in defaults apply. Unbundled
+executables and Windows builds still use settings beside the executable.
+
+If upgrading from the first alpha, existing saves and caches keep their
+location. To reuse game files and settings previously kept beside the app,
+copy your `tabletennis.toml` into the per-user directory and set
+`game_data_root` to the absolute path of your existing `game` folder, or
+install from the ISO again. The old files are not moved or deleted.
 
 With `store_shaders = true` (the default), known Vulkan pipelines are compiled
 before gameplay starts. This adds a short startup delay and avoids compiling
@@ -51,7 +57,7 @@ those pipelines again during play. A pipeline encountered for the first time
 can still cause a stutter; it is saved for the next launch.
 
 On macOS (Vulkan), normal play sessions automatically record stutter diagnostics in
-`logs/tabletennis_NNN.log` next to the app. `PERF hitch` entries report guest
+`logs/tabletennis_NNN.log` in that per-user directory. `PERF hitch` entries report guest
 swap intervals over 25 ms, pipeline compilation, GPU fence waits, guest file
 reads (including lock waits and memory invalidation), and stale protection
 recoveries. `PERF summary` reports average, p95, p99 and worst frame times
@@ -84,9 +90,11 @@ directory path.
 
 To wrap an existing signed app without rebuilding it, run
 `tools/package_macos_dmg.sh /path/to/TableTennisRecomp.app /path/to/output`.
-The DMG contains the app and copy-before-launch instructions; it does not
-include an Applications shortcut because game files currently live beside
-the app.
+The DMG contains the app, an Applications shortcut, and first-launch instructions.
+
+For a bundled-startup regression check, mount the DMG and run
+`python3 tools/check_macos_install.py /Volumes/"Table Tennis Recomp"/TableTennisRecomp.app`.
+It uses temporary user data and checks normal startup plus failing log paths.
 
 ## Approach
 

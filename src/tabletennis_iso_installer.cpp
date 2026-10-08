@@ -428,25 +428,14 @@ std::optional<rex::PathConfig> FinalizeGamePaths(const rex::PathConfig& defaults
   REXLOG_INFO("Game files not found at {}; showing the ISO installer",
               paths.game_data_root.string());
   const auto game_root = paths.game_data_root;
-  // macOS runs a quarantined app that was never moved from a randomized
-  // read-only mount, so nothing could be installed next to it.
-  const bool translocated = game_root.string().find("/AppTranslocation/") != std::string::npos;
   const char* intro =
-      translocated
-          ? "macOS is running this app from a temporary read-only location, so the game files "
-            "can't be installed next to it. Quit, move the app into another folder (dragging "
-            "it in Finder is enough), and open it again."
-          : "Table Tennis game files were not found. Select your own Xbox 360 ISO of Rockstar "
-            "Games presents Table Tennis to install them.";
+      "Select your own Xbox 360 ISO of Rockstar Games presents Table Tennis. "
+      "The game files will be installed below. Your ISO will not be modified.";
   new rex::ui::InstallWizardDialog(
       drawer, "Setup", "Game Files", intro, game_root.string(), [] { return PickIsoFile(); },
-      [game_root, translocated](const std::filesystem::path& source,
-                                std::atomic<uint64_t>& copied_bytes,
-                                std::atomic<uint64_t>& total_bytes, std::string& error) {
-        if (translocated) {
-          error = "Move the app out of its temporary location first, then open it again.";
-          return false;
-        }
+      [game_root](const std::filesystem::path& source,
+                  std::atomic<uint64_t>& copied_bytes,
+                  std::atomic<uint64_t>& total_bytes, std::string& error) {
         return InstallFromIso(source, game_root, copied_bytes, total_bytes, error);
       },
       [paths, resume = std::move(resume)]() mutable { resume(std::move(paths)); });

@@ -1,6 +1,6 @@
 // Installs the game files from the user's own Xbox 360 disc image. The
 // project ships no game data, so a first launch without them shows a wizard
-// that extracts the ISO next to the app.
+// that extracts the ISO into the configured game directory.
 
 #pragma once
 

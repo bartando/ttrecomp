@@ -1,7 +1,7 @@
 #!/bin/zsh
 # Packages a built tabletennis into TableTennisRecomp.app, a ZIP and a DMG.
 # The bundle carries no game files: the app asks for the user's own ISO on
-# first launch and extracts it next to the .app.
+# first launch and extracts it into the per-user data directory.
 #
 # usage: tools/package_macos.sh [build_dir] [output_dir]
 set -euo pipefail

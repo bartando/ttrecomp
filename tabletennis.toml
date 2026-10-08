@@ -1,10 +1,11 @@
 # Runtime config for the recompiled Table Tennis build.
 #
-# The app loads "<exe dir>/tabletennis.toml", so this file has to sit next to
-# the executable - copy it into out/build/<preset>/ after building.
+# Unbundled builds load "<exe dir>/tabletennis.toml". The macOS app bundle
+# loads "~/.local/share/tabletennis/tabletennis.toml" (XDG_DATA_HOME overrides
+# ~/.local/share). Copy this file there if you want to customize the defaults.
 
 # Game files come from your own ISO: on first launch the app asks for it and
-# extracts it to "<exe dir>/game". Set game_data_root to use files elsewhere.
+# extracts it to "game" beside the config. Set game_data_root to use files elsewhere.
 
 # macOS always uses the SDL backend; real controllers work through it as-is.
 input_backend = "sdl"

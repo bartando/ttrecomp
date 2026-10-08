@@ -105,6 +105,7 @@ set(TABLETENNIS_SOURCES
     src/native/tabletennis_scene_draw_catalog.cpp
     src/native/tabletennis_scene_owner_observer.cpp
     src/native/tabletennis_vertex_declaration.cpp
+    src/native/tabletennis_voice_session_guard.cpp
     src/test/tabletennis_frontend_launch_test.cpp
     src/tabletennis_defaults.cpp
     src/tabletennis_iso_installer.cpp

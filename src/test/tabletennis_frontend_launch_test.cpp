@@ -19,6 +19,11 @@ REXCVAR_DEFINE_BOOL(
     "venue as an offline Exhibition match.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_BOOL(
+    tabletennis_test_rally, false, "Table Tennis",
+    "Test-only: once the test path reaches gameplay, keep tapping A so the "
+    "player serves and swings, giving measurements of real rallies.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(
     tabletennis_test_capture_gameplay_trace, false, "Table Tennis",
     "Test-only: capture one GPU frame when the two-player render marker "
     "proves gameplay is live.")
@@ -417,8 +422,13 @@ void NotifyGameplayReached() {
     return;
   }
   rex::kernel::xam::ClearSyntheticInput();
-  REXLOG_INFO(
-      "Table Tennis test path: gameplay reached; synthetic input disabled");
+  if (REXCVAR_GET(tabletennis_test_rally)) {
+    rex::kernel::xam::SetSyntheticAutoTap(rex::input::X_INPUT_GAMEPAD_A, true);
+    REXLOG_INFO("Table Tennis test path: gameplay reached; tapping A for rallies");
+  } else {
+    REXLOG_INFO(
+        "Table Tennis test path: gameplay reached; synthetic input disabled");
+  }
   if (!REXCVAR_GET(tabletennis_test_capture_gameplay_trace)) {
     return;
   }

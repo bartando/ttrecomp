@@ -1,0 +1,1508 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 4392ea4..be7a4fd 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -147,6 +147,10 @@ elseif(APPLE)
+         message(FATAL_ERROR "Unsupported macOS architecture: ${REX_TARGET_PROCESSOR}. macOS builds are ARM64-only.")
+     endif()
+     add_compile_definitions(REX_PLATFORM_MAC=1)
++elseif(PS5)
++    set(REX_PLATFORM "ps5-amd64")
++    add_compile_definitions(REX_PLATFORM_PS5=1)
++    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-frtti>" "$<$<COMPILE_LANGUAGE:CXX>:-fexceptions>")
+ elseif(UNIX AND NOT APPLE)
+     if(REX_TARGET_PROCESSOR MATCHES "AMD64|x86_64")
+         set(REX_PLATFORM "linux-amd64")
+@@ -200,6 +204,12 @@ configure_file(
+ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${REXGLUE_ROOT}/out/${REX_PLATFORM}")
+ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${REXGLUE_ROOT}/out/${REX_PLATFORM}")
+ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${REXGLUE_ROOT}/out/${REX_PLATFORM}")
++if(PS5 AND REXGLUE_PS5_OUTPUT_DIRECTORY)
++    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${REXGLUE_PS5_OUTPUT_DIRECTORY}")
++    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${REXGLUE_PS5_OUTPUT_DIRECTORY}")
++    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${REXGLUE_PS5_OUTPUT_DIRECTORY}")
++endif()
++
+ 
+ # Sanitizer support for debugging memory corruption and undefined behavior
+ if(REXGLUE_ENABLE_SANITIZERS)
+@@ -233,8 +243,10 @@ add_subdirectory(src/audio)
+ add_subdirectory(src/graphics)
+ add_subdirectory(src/system)
+ add_subdirectory(src/kernel)
+-add_subdirectory(src/codegen)
+-add_subdirectory(src/rexglue)
++if(NOT PS5)
++    add_subdirectory(src/codegen)
++    add_subdirectory(src/rexglue)
++endif()
+ 
+ # Add tests subdirectory if tests are enabled
+ if(REXGLUE_BUILD_TESTS)
+@@ -260,7 +272,9 @@ message(STATUS "===========================================")
+ # SDK install/export rules (skipped when consumed as a subdirectory)
+ if(PROJECT_IS_TOP_LEVEL)
+     include(cmake/rexglue_devenv.cmake)
+-    include(cmake/rexglue_install.cmake)
++    if(NOT PS5)
++        include(cmake/rexglue_install.cmake)
++    endif()
+ else()
+     # When consumed via add_subdirectory(), provide the same interface as find_package().
+     # This sets REXGLUE_SHARE_DIR and makes rexglue_configure_target() available.
+@@ -268,3 +282,7 @@ else()
+     set(REXGLUE_SHARE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/ui")
+     include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/rexglue_helpers.cmake)
+ endif()
++
++if(PS5 AND REXGLUE_PS5_GAME_SOURCE)
++    add_subdirectory("${REXGLUE_PS5_GAME_SOURCE}/ps5/game" ps5-game)
++endif()
+diff --git a/include/rex/memory/utils.h b/include/rex/memory/utils.h
+index 1c9fc65..14ddc58 100644
+--- a/include/rex/memory/utils.h
++++ b/include/rex/memory/utils.h
+@@ -145,6 +145,33 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length, P
+                   size_t file_offset);
+ bool UnmapFileView(FileMappingHandle handle, void* base_address, size_t length);
+ 
++#if REX_PLATFORM_PS5
++// Reserve an address range that views of the mapping will be placed in with
++// MapFileView, at an address of the kernel's choosing. How the reservation is
++// made depends on what backs the mapping (a shared object, or direct memory in
++// an installed title). Returns nullptr on failure.
++void* ReserveFileMappingRange(FileMappingHandle handle, size_t length);
++bool ReleaseFileMappingRange(FileMappingHandle handle, void* base_address, size_t length);
++// Number of Protect() calls made so far, for performance diagnosis.
++uint64_t Ps5ProtectCallCount();
++// The same, by who asked: 0 anything else, 1 enabling write-watches, 2 a watch
++// being triggered (a guest write fault or the GPU writing guest memory),
++// 3 reconciling host page protection with guest pages smaller than a host
++// page, 4 the access-violation callback's stale-protection recovery.
++inline constexpr int kPs5ProtectSiteCount = 5;
++uint64_t Ps5ProtectCallCount(int site);
++// Set (through Ps5ProtectSiteScope) by the code about to call Protect(). A
++// function, not an extern thread_local: that would make a weak reference to
++// the variable's initialisation function, which a title cannot link.
++int& Ps5ProtectSite();
++struct Ps5ProtectSiteScope {
++  explicit Ps5ProtectSiteScope(int site) : slot(Ps5ProtectSite()), previous(slot) { slot = site; }
++  ~Ps5ProtectSiteScope() { slot = previous; }
++  int& slot;
++  int previous;
++};
++#endif
++
+ inline size_t hash_combine(size_t seed) {
+   return seed;
+ }
+diff --git a/include/rex/platform/dynlib.h b/include/rex/platform/dynlib.h
+index 3e00730..02ba0bc 100644
+--- a/include/rex/platform/dynlib.h
++++ b/include/rex/platform/dynlib.h
+@@ -64,6 +64,10 @@ inline constexpr const char* kMoltenVK = "libMoltenVK.dylib";
+ inline constexpr const char* kRenderDoc = "librenderdoc.dylib";
+ inline constexpr const char* kSpirvToolsSdkPath = "bin/libSPIRV-Tools-shared.dylib";
+ 
++#elif REX_PLATFORM_PS5
++inline constexpr const char* kVulkanLoader = "";
++inline constexpr const char* kRenderDoc = "";
++inline constexpr const char* kSpirvToolsSdkPath = "";
+ #else
+ #error No library names provided for the target platform.
+ #endif
+diff --git a/include/rex/thread/fiber.h b/include/rex/thread/fiber.h
+index c80e029..7749e06 100644
+--- a/include/rex/thread/fiber.h
++++ b/include/rex/thread/fiber.h
+@@ -70,6 +70,9 @@ struct Fiber {
+   bool is_thread_fiber_ = false;
+ 
+   static void Trampoline();
++#elif REX_PLATFORM_PS5
++  // Thread fibers only; see fiber_ps5.cpp.
++  bool is_thread_fiber_ = false;
+ #endif
+ };
+ 
+diff --git a/include/rex/thread/mutex.h b/include/rex/thread/mutex.h
+index 6e5755a..51a0674 100644
+--- a/include/rex/thread/mutex.h
++++ b/include/rex/thread/mutex.h
+@@ -13,8 +13,40 @@
+ 
+ #include <mutex>
+ 
++#include <rex/platform.h>
++
++#if REX_PLATFORM_PS5
++#include <immintrin.h>
++#endif
++
+ namespace rex::thread {
+ 
++#if REX_PLATFORM_PS5
++// Taking the global lock on PS5: try for a short while before sleeping on it.
++//
++// The lock is held briefly but taken constantly, by the GPU command thread,
++// the guest's main thread, the audio thread and the vsync thread. A profile of
++// the game on the console showed the GPU thread blocked on it for over 40% of
++// its time, far more than the work done under the lock accounts for: a thread
++// that finds it taken sleeps in the kernel, and getting it running again
++// costs much more than the wait was worth. Spinning covers the common case,
++// where the holder is a few tens of microseconds from releasing it.
++inline std::unique_lock<std::recursive_mutex> AcquireGlobalLockSpinning(
++    std::recursive_mutex& mutex) {
++  std::unique_lock<std::recursive_mutex> lock(mutex, std::try_to_lock);
++  for (int attempt = 0; !lock.owns_lock() && attempt < 4000; ++attempt) {
++    for (int pause = 0; pause < 24; ++pause) {
++      _mm_pause();
++    }
++    lock.try_lock();
++  }
++  if (!lock.owns_lock()) {
++    lock.lock();
++  }
++  return lock;
++}
++#endif
++
+ // The global critical region mutex singleton.
+ // This must guard any operation that may suspend threads or be sensitive to
+ // being suspended such as global table locks and such.
+@@ -62,12 +94,20 @@ class global_critical_region {
+   // to keep an instance of global_critical_region near the members requiring
+   // it to keep things readable.
+   static std::unique_lock<std::recursive_mutex> AcquireDirect() {
++#if REX_PLATFORM_PS5
++    return AcquireGlobalLockSpinning(mutex());
++#else
+     return std::unique_lock<std::recursive_mutex>(mutex());
++#endif
+   }
+ 
+   // Acquires a lock on the global critical section.
+   inline std::unique_lock<std::recursive_mutex> Acquire() {
++#if REX_PLATFORM_PS5
++    return AcquireGlobalLockSpinning(mutex());
++#else
+     return std::unique_lock<std::recursive_mutex>(mutex());
++#endif
+   }
+ 
+   // Acquires a deferred lock on the global critical section.
+diff --git a/include/rex/ui/renderdoc_api.h b/include/rex/ui/renderdoc_api.h
+index 04262f2..38dbcd4 100644
+--- a/include/rex/ui/renderdoc_api.h
++++ b/include/rex/ui/renderdoc_api.h
+@@ -14,7 +14,13 @@
+ 
+ #include <rex/platform/dynlib.h>
+ 
++#if REX_PLATFORM_PS5
++#define __linux__ 1
+ #include <renderdoc_app.h>
++#undef __linux__
++#else
++#include <renderdoc_app.h>
++#endif
+ 
+ namespace rex {
+ namespace ui {
+diff --git a/include/rex/ui/surface.h b/include/rex/ui/surface.h
+index 0edf991..c8362af 100644
+--- a/include/rex/ui/surface.h
++++ b/include/rex/ui/surface.h
+@@ -35,12 +35,14 @@ class Surface {
+     kTypeIndex_Win32Hwnd,
+     // macOS.
+     kTypeIndex_SDLMetalView,
++    kTypeIndex_Ps5Display,
+   };
+   using TypeFlags = uint32_t;
+   enum : TypeFlags {
+     kTypeFlag_AndroidNativeWindow = TypeFlags(1) << kTypeIndex_AndroidNativeWindow,
+     kTypeFlag_XcbWindow = TypeFlags(1) << kTypeIndex_XcbWindow,
+     kTypeFlag_SDLMetalView = TypeFlags(1) << kTypeIndex_SDLMetalView,
++    kTypeFlag_Ps5Display = TypeFlags(1) << kTypeIndex_Ps5Display,
+     kTypeFlag_Win32Hwnd = TypeFlags(1) << kTypeIndex_Win32Hwnd,
+   };
+ 
+diff --git a/include/rex/ui/surface_ps5.h b/include/rex/ui/surface_ps5.h
+new file mode 100644
+index 0000000..01dba4e
+--- /dev/null
++++ b/include/rex/ui/surface_ps5.h
+@@ -0,0 +1,39 @@
++/**
++ * @file        rex/ui/surface_ps5.h
++ * @brief       Presentation surface for PlayStation 5 homebrew.
++ *
++ * The console has no window system. The Vulkan driver presents to the display
++ * itself through VK_KHR_display, so the surface is just the display at a
++ * chosen size; the presenter picks the display mode of that size when it
++ * creates the Vulkan surface.
++ */
++
++#pragma once
++
++#include <cstdint>
++
++#include <rex/ui/surface.h>
++
++namespace rex {
++namespace ui {
++
++class Ps5DisplaySurface final : public Surface {
++ public:
++  Ps5DisplaySurface(uint32_t width, uint32_t height) : width_(width), height_(height) {}
++
++  TypeIndex GetType() const override { return kTypeIndex_Ps5Display; }
++
++ protected:
++  bool GetSizeImpl(uint32_t& width_out, uint32_t& height_out) const override {
++    width_out = width_;
++    height_out = height_;
++    return true;
++  }
++
++ private:
++  uint32_t width_;
++  uint32_t height_;
++};
++
++}  // namespace ui
++}  // namespace rex
+diff --git a/include/rex/ui/vulkan/instance.h b/include/rex/ui/vulkan/instance.h
+index c03360b..0286292 100644
+--- a/include/rex/ui/vulkan/instance.h
++++ b/include/rex/ui/vulkan/instance.h
+@@ -87,6 +87,9 @@ class VulkanInstance {
+   // supported (with the `ext_major_minor_` prefix rather than `ext_`).
+   struct Extensions {
+     bool ext_KHR_surface = false;  // #1
++#if REX_PLATFORM_PS5
++    bool ext_KHR_display = false;  // #3
++#endif
+ #ifdef VK_USE_PLATFORM_XCB_KHR
+     bool ext_KHR_xcb_surface = false;  // #6
+ #endif
+diff --git a/resources/templates/codegen/init_h.inja b/resources/templates/codegen/init_h.inja
+index 5586034..76ff64b 100644
+--- a/resources/templates/codegen/init_h.inja
++++ b/resources/templates/codegen/init_h.inja
+@@ -111,7 +111,7 @@ extern PPCFuncMapping {{ project }}_PPCFuncMappings[];
+ // Memory Access
+ //=============================================================================
+ 
+-#if REX_PLATFORM_WIN32 || (REX_PLATFORM_MAC && REX_ARCH_ARM64)
++#if REX_PLATFORM_WIN32 || (REX_PLATFORM_MAC && REX_ARCH_ARM64) || REX_PLATFORM_PS5
+ #define REX_PHYS_HOST_OFFSET(addr) (((u32)(addr) >= 0xE0000000u) ? 0x1000u : 0u)
+ #else
+ #define REX_PHYS_HOST_OFFSET(addr) 0u
+diff --git a/resources/templates/test/ppc_config_h.inja b/resources/templates/test/ppc_config_h.inja
+index 9a42506..8f76938 100644
+--- a/resources/templates/test/ppc_config_h.inja
++++ b/resources/templates/test/ppc_config_h.inja
+@@ -69,7 +69,7 @@
+ #endif
+ #endif
+ 
+-#if REX_PLATFORM_WIN32 || (REX_PLATFORM_MAC && REX_ARCH_ARM64)
++#if REX_PLATFORM_WIN32 || (REX_PLATFORM_MAC && REX_ARCH_ARM64) || REX_PLATFORM_PS5
+ #define REX_PHYS_HOST_OFFSET(addr) (((u32)(addr) >= 0xE0000000u) ? 0x1000u : 0u)
+ #else
+ #define REX_PHYS_HOST_OFFSET(addr) 0u
+diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
+index 98734ba..15c8185 100644
+--- a/src/audio/xma_context.cpp
++++ b/src/audio/xma_context.cpp
+@@ -490,8 +490,13 @@ void XmaContext::StoreContextMerged(const XMA_CONTEXT_DATA& data,
+ 
+   const auto cas_update = [&](size_t dword_idx, uint32_t mask, uint32_t value) {
+     uint32_t* p = reinterpret_cast<uint32_t*>(context_ptr) + dword_idx;
++#if REX_PLATFORM_PS5
++    // The payload SDK's libc++ 18 has no atomic_ref. Keep identical CAS ordering.
++    uint32_t old_be = __atomic_load_n(p, __ATOMIC_RELAXED);
++#else
+     std::atomic_ref<uint32_t> ref(*p);
+     uint32_t old_be = ref.load(std::memory_order_relaxed);
++#endif
+     while (true) {
+       const uint32_t old_host = rex::byte_swap(old_be);
+       const uint32_t new_host = (old_host & ~mask) | (value & mask);
+@@ -501,8 +506,13 @@ void XmaContext::StoreContextMerged(const XMA_CONTEXT_DATA& data,
+       }
+       // release: decoded PCM written to the output ring must be visible
+       // before the write offset advances.
++#if REX_PLATFORM_PS5
++      if (__atomic_compare_exchange_n(p, &old_be, new_be, true, __ATOMIC_RELEASE,
++                                      __ATOMIC_RELAXED)) {
++#else
+       if (ref.compare_exchange_weak(old_be, new_be, std::memory_order_release,
+                                     std::memory_order_relaxed)) {
++#endif
+         return;
+       }
+     }
+diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
+index 2edaf87..b3a5a5a 100644
+--- a/src/core/CMakeLists.txt
++++ b/src/core/CMakeLists.txt
+@@ -53,8 +53,10 @@ elseif(UNIX)
+         dbg_posix.cpp
+         dynlib_posix.cpp
+         exception_handler_posix.cpp
++        exception_handler_ps5.cpp
+         filesystem_posix.cpp
+         fiber_posix.cpp
++        fiber_ps5.cpp
+         mapped_memory_posix.cpp
+         math_gcc.cpp
+         memory_posix.cpp
+@@ -77,7 +79,7 @@ target_include_directories(rexcore PRIVATE
+     ${PROJECT_SOURCE_DIR}/thirdparty/cli11/include
+ )
+ 
+-if(UNIX)
++if(UNIX AND NOT PS5)
+     target_link_libraries(rexcore PRIVATE pthread dl)
+     if(NOT APPLE)
+         target_link_libraries(rexcore PRIVATE rt)
+diff --git a/src/core/atomic_posix.cpp b/src/core/atomic_posix.cpp
+index 378aa4b..c28a596 100644
+--- a/src/core/atomic_posix.cpp
++++ b/src/core/atomic_posix.cpp
+@@ -1,7 +1,7 @@
+ #include <rex/platform.h>
+ #include <rex/thread/atomic.h>
+ 
+-static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only");
++static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC || REX_PLATFORM_PS5, "This file is POSIX-only");
+ 
+ namespace rex::thread {
+ 
+diff --git a/src/core/clock_posix.cpp b/src/core/clock_posix.cpp
+index 5365c53..6ec0c70 100644
+--- a/src/core/clock_posix.cpp
++++ b/src/core/clock_posix.cpp
+@@ -10,13 +10,13 @@
+ #include <rex/chrono/clock.h>
+ #include <rex/platform.h>
+ 
+-static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only");
++static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC || REX_PLATFORM_PS5, "This file is POSIX-only");
+ 
+ #include <sys/time.h>
+ 
+ namespace rex::chrono {
+ 
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_MAC || REX_PLATFORM_PS5
+ constexpr clockid_t kHostClock = CLOCK_MONOTONIC;
+ #else
+ constexpr clockid_t kHostClock = CLOCK_MONOTONIC_RAW;
+diff --git a/src/core/dynlib_posix.cpp b/src/core/dynlib_posix.cpp
+index ca1994c..f726fde 100644
+--- a/src/core/dynlib_posix.cpp
++++ b/src/core/dynlib_posix.cpp
+@@ -1,7 +1,7 @@
+ #include <rex/platform.h>
+ #include <rex/platform/dynlib.h>
+ 
+-static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only");
++static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC || REX_PLATFORM_PS5, "This file is POSIX-only");
+ 
+ #include <dlfcn.h>
+ 
+diff --git a/src/core/fiber_ps5.cpp b/src/core/fiber_ps5.cpp
+new file mode 100644
+index 0000000..95e2cdb
+--- /dev/null
++++ b/src/core/fiber_ps5.cpp
+@@ -0,0 +1,58 @@
++/**
++ * @file        core/fiber_ps5.cpp
++ * @brief       Fiber support for PlayStation 5 homebrew: thread fibers only.
++ *
++ * Every guest thread converts itself to a fiber when it starts, so that much
++ * has to exist. Creating further fibers and switching between them is done
++ * with getcontext/makecontext/swapcontext on the other POSIX platforms; on the
++ * console the saved context does not have the layout the payload SDKs declare
++ * (see exception_handler_ps5.cpp), so those calls are not used here. A title
++ * that creates fibers needs a hand-written context switch instead.
++ */
++
++#include <rex/platform.h>
++#if REX_PLATFORM_PS5
++
++#include <rex/thread/fiber.h>
++
++#include <cassert>
++#include <cstdio>
++#include <cstdlib>
++
++namespace rex::thread {
++
++thread_local Fiber* Fiber::tls_current_ = nullptr;
++
++Fiber* Fiber::ConvertCurrentThread() {
++  auto* f = new Fiber();
++  f->is_thread_fiber_ = true;
++  tls_current_ = f;
++  return f;
++}
++
++Fiber* Fiber::Create(size_t stack_size, void (*entry)(void*), void* arg) {
++  (void)stack_size;
++  (void)entry;
++  (void)arg;
++  std::fputs("rex::thread::Fiber::Create is not implemented on PS5\n", stderr);
++  return nullptr;
++}
++
++void Fiber::SwitchTo(Fiber* target) {
++  (void)target;
++  std::fputs("rex::thread::Fiber::SwitchTo is not implemented on PS5\n", stderr);
++  std::abort();
++}
++
++void Fiber::Destroy() {
++  if (is_thread_fiber_) {
++    tls_current_ = nullptr;
++  } else {
++    assert(this != tls_current_ && "Destroy called on the currently running fiber");
++  }
++  delete this;
++}
++
++}  // namespace rex::thread
++
++#endif  // REX_PLATFORM_PS5
+diff --git a/src/core/filesystem_posix.cpp b/src/core/filesystem_posix.cpp
+index 6e65d8a..30bac59 100644
+--- a/src/core/filesystem_posix.cpp
++++ b/src/core/filesystem_posix.cpp
+@@ -36,7 +36,9 @@
+ 
+ #if REX_PLATFORM_MAC
+ #include <mach-o/dyld.h>
++#endif
+ 
++#if REX_PLATFORM_MAC || REX_PLATFORM_PS5
+ using off64_t = off_t;
+ #define fseeko64 fseeko
+ #define ftello64 ftello
+@@ -64,7 +66,9 @@ std::filesystem::path to_path(const std::u16string_view source) {
+ namespace filesystem {
+ 
+ std::filesystem::path GetExecutablePath() {
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_PS5
++  return "/app0/eboot.bin";
++#elif REX_PLATFORM_MAC
+   uint32_t size = PATH_MAX;
+   std::vector<char> path(size);
+   if (_NSGetExecutablePath(path.data(), &size) != 0) {
+diff --git a/src/core/logging.cpp b/src/core/logging.cpp
+index aa117cc..910ecd2 100644
+--- a/src/core/logging.cpp
++++ b/src/core/logging.cpp
+@@ -30,6 +30,9 @@
+ #include <spdlog/sinks/msvc_sink.h>
+ #else
+ #include <spdlog/sinks/stdout_sinks.h>
++#if REX_PLATFORM_PS5
++#include <spdlog/sinks/null_sink.h>
++#endif
+ #endif
+ 
+ REXCVAR_DEFINE_STRING(log_level, "info", "Log",
+@@ -173,6 +176,9 @@ void InitLoggingEarly() {
+ 
+ #if REX_PLATFORM_WIN32
+   auto sink = std::make_shared<spdlog::sinks::msvc_sink_mt>();
++#elif REX_PLATFORM_PS5
++  // Native titles have no usable stdout. The host installs a descriptor sink.
++  auto sink = std::make_shared<spdlog::sinks::null_sink_mt>();
+ #else
+   auto sink = std::make_shared<spdlog::sinks::stdout_sink_mt>();
+ #endif
+diff --git a/src/core/mapped_memory_posix.cpp b/src/core/mapped_memory_posix.cpp
+index f6ca329..cfc5666 100644
+--- a/src/core/mapped_memory_posix.cpp
++++ b/src/core/mapped_memory_posix.cpp
+@@ -20,7 +20,7 @@
+ #include <rex/memory/mapped_memory.h>
+ #include <rex/platform.h>
+ 
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_MAC || REX_PLATFORM_PS5
+ using off64_t = off_t;
+ #define stat64 stat
+ #define fstat64 fstat
+diff --git a/src/core/memory_posix.cpp b/src/core/memory_posix.cpp
+index 34a51a9..8bb63fc 100644
+--- a/src/core/memory_posix.cpp
++++ b/src/core/memory_posix.cpp
+@@ -9,6 +9,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <atomic>
+ #include <cerrno>
+ #include <cstddef>
+ #include <cstdio>
+@@ -38,17 +39,33 @@
+ // #include "xenia/base/main_android.h"
+ #endif
+ 
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_MAC || REX_PLATFORM_PS5
+ #define ftruncate64 ftruncate
+ #define mmap64 mmap
+ #endif
+ 
++#if REX_PLATFORM_PS5
++#include <ps5platform/kernel.h>
++#endif
++
+ namespace rex {
+ namespace memory {
+ 
++#if REX_PLATFORM_PS5
++// Native-title direct arena, adapted from holdmysocks/mcla-recomp (GPL-3.0-or-later).
+ namespace {
++constexpr FileMappingHandle kDirectMemoryHandle = 0x44495243;
++constexpr size_t kDirectAlignment = 0x200000;
++int64_t direct_start = -1;
++size_t direct_length = 0;
++std::atomic<uint64_t> protect_calls{0};
++std::atomic<uint64_t> protect_site_calls[kPs5ProtectSiteCount]{};
++}
++#endif
+ 
+-#if REX_PLATFORM_MAC
++namespace {
++
++#if REX_PLATFORM_MAC || REX_PLATFORM_PS5
+ void AlignHostPageRange(void*& base_address, size_t& length) {
+   const uintptr_t page_mask = uintptr_t(page_size() - 1);
+   const uintptr_t start = reinterpret_cast<uintptr_t>(base_address);
+@@ -243,7 +260,7 @@ void* AllocFixed(void* base_address, size_t length, AllocationType allocation_ty
+       break;
+   }
+ 
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_MAC || REX_PLATFORM_PS5
+   if (base_address &&
+       (allocation_type == AllocationType::kCommit ||
+        allocation_type == AllocationType::kReserveCommit)) {
+@@ -253,6 +270,10 @@ void* AllocFixed(void* base_address, size_t length, AllocationType allocation_ty
+     if (mprotect(protect_base, protect_length, static_cast<int>(prot_requested)) == 0) {
+       return base_address;
+     }
++#if REX_PLATFORM_PS5
++    // Never replace an existing guest alias with anonymous memory on failure.
++    return nullptr;
++#endif
+   }
+ #endif
+ 
+@@ -294,7 +315,7 @@ bool DeallocFixed(void* base_address, size_t length, DeallocationType deallocati
+   switch (deallocation_type) {
+     case DeallocationType::kDecommit: {
+       // Decommit: remove access first, then release physical pages
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_MAC || REX_PLATFORM_PS5
+       AlignHostPageRange(base_address, length);
+ #endif
+       if (mprotect(base_address, length, PROT_NONE) != 0) {
+@@ -335,8 +356,13 @@ bool Protect(void* base_address, size_t length, PageAccess access, PageAccess* o
+ #endif
+ 
+   uint32_t prot = ToPosixProtectFlags(access);
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_MAC || REX_PLATFORM_PS5
+   AlignHostPageRange(base_address, length);
++#endif
++#if REX_PLATFORM_PS5
++  protect_calls.fetch_add(1, std::memory_order_relaxed);
++  const int site = Ps5ProtectSite();
++  if (site >= 0 && site < kPs5ProtectSiteCount) protect_site_calls[site].fetch_add(1, std::memory_order_relaxed);
+ #endif
+   return mprotect(base_address, length, prot) == 0;
+ }
+@@ -407,6 +433,24 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
+       return kFileMappingHandleInvalid;
+   }
+   oflag |= O_CREAT;
++#if REX_PLATFORM_PS5
++  // An installed title's flexible-memory budget cannot hold the 4.5 GiB arena.
++  // Use direct memory, which supports the same shared aliases without that budget.
++  if (direct_start >= 0 || length > SIZE_MAX - (kDirectAlignment - 1)) {
++    return kFileMappingHandleInvalid;
++  }
++  const size_t bytes = (length + kDirectAlignment - 1) & ~(kDirectAlignment - 1);
++  int64_t start = -1;
++  const int32_t status = sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), bytes,
++      kDirectAlignment, PS5_KERNEL_DIRECT_TYPE_CPU, &start);
++  if (status != 0) {
++    std::fprintf(stderr, "PS5 guest arena allocation failed: bytes=0x%zx status=0x%x\n", bytes, unsigned(status));
++    return kFileMappingHandleInvalid;
++  }
++  direct_start = start;
++  direct_length = bytes;
++  return kDirectMemoryHandle;
++#else
+   auto full_path = MakeShmName(path);
+   int ret = shm_open(full_path.c_str(), oflag, 0777);
+   if (ret < 0) {
+@@ -418,12 +462,23 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
+     return kFileMappingHandleInvalid;
+   }
+   return static_cast<FileMappingHandle>(ret);
++#endif  // PS5 direct-memory arena
+ #endif
+ }
+ 
+ void CloseFileMappingHandle(FileMappingHandle handle, const std::filesystem::path& path) {
++#if REX_PLATFORM_PS5
++  if (handle == kDirectMemoryHandle) {
++    if (direct_start >= 0) {
++      const int32_t status = sceKernelReleaseDirectMemory(direct_start, direct_length);
++      if (status != 0) std::fprintf(stderr, "PS5 arena release failed: 0x%x\n", unsigned(status));
++      else { direct_start = -1; direct_length = 0; }
++    }
++    return;
++  }
++#endif
+   close(static_cast<int>(handle));
+-#if !REX_PLATFORM_ANDROID
++#if !REX_PLATFORM_ANDROID && !REX_PLATFORM_PS5
+   auto full_path = MakeShmName(path);
+   shm_unlink(full_path.c_str());
+ #endif
+@@ -447,6 +502,20 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length, P
+   }
+ 
+   uint32_t prot = ToPosixProtectFlags(access);
++#if REX_PLATFORM_PS5
++  if (handle == kDirectMemoryHandle) {
++    if (direct_start < 0 || file_offset > direct_length || length > direct_length - file_offset) return nullptr;
++    void* address = base_address;
++    const int32_t status = sceKernelMapDirectMemory(&address, length, int(prot),
++        base_address ? PS5_KERNEL_MAP_FIXED : 0, direct_start + int64_t(file_offset), page);
++    if (status != 0) return nullptr;
++    if (base_address && address != base_address) {
++      sceKernelMunmap(address, length);
++      return nullptr;
++    }
++    return address;
++  }
++#endif
+   void* result = mmap64(base_address, length, prot, flags, static_cast<int>(handle),
+                         static_cast<off_t>(file_offset));
+   if (result == MAP_FAILED) {
+@@ -463,8 +532,34 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length, P
+ }
+ 
+ bool UnmapFileView(FileMappingHandle handle, void* base_address, size_t length) {
++#if REX_PLATFORM_PS5
++  if (handle == kDirectMemoryHandle) return sceKernelMunmap(base_address, length) == 0;
++#endif
+   return munmap(base_address, length) == 0;
+ }
+ 
++#if REX_PLATFORM_PS5
++void* ReserveFileMappingRange(FileMappingHandle handle, size_t length) {
++  if (handle != kDirectMemoryHandle) return nullptr;
++  void* address = reinterpret_cast<void*>(uintptr_t{0x1000000000ull});
++  const int32_t status = sceKernelReserveVirtualRange(&address, length, 0, PS5_KERNEL_DIRECT_ALIGNMENT);
++  if (status != 0) return nullptr;
++  const uintptr_t start = reinterpret_cast<uintptr_t>(address);
++  if (start < 0x300000000ull && start + length > 0x200000000ull) {
++    sceKernelMunmap(address, length);
++    return nullptr;
++  }
++  return address;
++}
++bool ReleaseFileMappingRange(FileMappingHandle handle, void* address, size_t length) {
++  return handle == kDirectMemoryHandle && sceKernelMunmap(address, length) == 0;
++}
++int& Ps5ProtectSite() { static thread_local int site = 0; return site; }
++uint64_t Ps5ProtectCallCount() { return protect_calls.load(std::memory_order_relaxed); }
++uint64_t Ps5ProtectCallCount(int site) {
++  return site >= 0 && site < kPs5ProtectSiteCount ? protect_site_calls[site].load(std::memory_order_relaxed) : 0;
++}
++#endif
++
+ }  // namespace memory
+ }  // namespace rex
+diff --git a/src/core/seh_posix.cpp b/src/core/seh_posix.cpp
+index 5e0a932..cbec078 100644
+--- a/src/core/seh_posix.cpp
++++ b/src/core/seh_posix.cpp
+@@ -9,7 +9,7 @@
+ #include <rex/platform.h>
+ #include <rex/platform/seh.h>
+ 
+-static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only");
++static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC || REX_PLATFORM_PS5, "This file is POSIX-only");
+ 
+ #include <signal.h>
+ #include <cstdlib>  // std::abort()
+diff --git a/src/core/socket_posix.cpp b/src/core/socket_posix.cpp
+index b4b885a..19ace70 100644
+--- a/src/core/socket_posix.cpp
++++ b/src/core/socket_posix.cpp
+@@ -1,7 +1,7 @@
+ #include <rex/net/socket.h>
+ #include <rex/platform.h>
+ 
+-static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only");
++static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC || REX_PLATFORM_PS5, "This file is POSIX-only");
+ 
+ #include <sys/ioctl.h>
+ #include <unistd.h>
+diff --git a/src/core/string_posix.cpp b/src/core/string_posix.cpp
+index 5e59c28..6973a9e 100644
+--- a/src/core/string_posix.cpp
++++ b/src/core/string_posix.cpp
+@@ -9,7 +9,7 @@
+ #include <rex/platform.h>
+ #include <rex/string.h>
+ 
+-static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only");
++static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC || REX_PLATFORM_PS5, "This file is POSIX-only");
+ 
+ #include <string.h>
+ 
+diff --git a/src/core/threading_posix.cpp b/src/core/threading_posix.cpp
+index bd0157a..1d61e1a 100644
+--- a/src/core/threading_posix.cpp
++++ b/src/core/threading_posix.cpp
+@@ -9,7 +9,7 @@
+ #include <rex/platform.h>
+ #include <rex/thread.h>
+ 
+-static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only");
++static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC || REX_PLATFORM_PS5, "This file is POSIX-only");
+ 
+ #include <signal.h>
+ 
+@@ -23,6 +23,10 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
+ #include <memory>
+ 
+ #include <pthread.h>
++#if REX_PLATFORM_PS5
++#include <pthread_np.h>
++#include <ps5platform/kernel.h>
++#endif
+ #include <semaphore.h>
+ #include <sys/time.h>
+ #include <sys/types.h>
+@@ -113,7 +117,7 @@ enum class SignalType {
+ };
+ 
+ int GetSystemSignal(SignalType num) {
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_MAC || REX_PLATFORM_PS5
+   switch (num) {
+     case SignalType::kThreadSuspend:
+       return SIGUSR1;
+@@ -131,7 +135,7 @@ int GetSystemSignal(SignalType num) {
+ }
+ 
+ SignalType GetSystemSignalType(int num) {
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_MAC || REX_PLATFORM_PS5
+   switch (num) {
+     case SIGUSR1:
+       return SignalType::kThreadSuspend;
+@@ -172,10 +176,14 @@ void EnableAffinityConfiguration() {}
+ // uint64_t ticks() { return mach_absolute_time(); }
+ 
+ uint32_t current_thread_system_id() {
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_MAC || REX_PLATFORM_PS5
++#if REX_PLATFORM_PS5
++  return uint32_t(pthread_getthreadid_np());
++#else
+   uint64_t thread_id;
+   pthread_threadid_np(nullptr, &thread_id);
+   return static_cast<uint32_t>(thread_id);
++#endif
+ #else
+   return static_cast<uint32_t>(syscall(SYS_gettid));
+ #endif
+@@ -600,6 +608,83 @@ struct ThreadStartData {
+   Thread* thread_obj;
+ };
+ 
++#if REX_PLATFORM_PS5
++}  // namespace rex::thread
++
++#include <chrono>
++#include <mutex>
++#include <vector>
++
++namespace rex::thread {
++
++// Thread stacks from direct memory.
++//
++// In an installed title a stack that pthread allocates comes out of the
++// title's flexible memory, 448 MiB in all on firmware 13.42. Guest threads ask
++// for 16 MiB each, so a game's couple of dozen threads exhaust it and
++// pthread_create fails (seen as "CreateThread failed" C0000017). Direct memory
++// is 12 GiB. A stack is one direct allocation mapped above a reserved,
++// inaccessible guard range.
++//
++// Stacks are reused rather than released: there is no point at which the
++// thread that ran on one is known to have left it for good, so a stack goes
++// back to the pool when its thread object is destroyed after finishing, and is
++// handed out again only once it has been retired for a while.
++struct DirectStack {
++  void* base = nullptr;
++  size_t size = 0;
++  std::chrono::steady_clock::time_point retired;
++};
++
++inline std::mutex g_direct_stack_mutex;
++inline std::vector<DirectStack> g_direct_stack_pool;
++
++inline bool AcquireDirectStack(size_t size, DirectStack& out) {
++  constexpr size_t kUnit = 0x10000;
++  size = (size + kUnit - 1) & ~(kUnit - 1);
++  {
++    std::lock_guard<std::mutex> lock(g_direct_stack_mutex);
++    const auto now = std::chrono::steady_clock::now();
++    for (auto it = g_direct_stack_pool.begin(); it != g_direct_stack_pool.end(); ++it) {
++      if (it->size == size && now - it->retired > std::chrono::seconds(2)) {
++        out = *it;
++        g_direct_stack_pool.erase(it);
++        return true;
++      }
++    }
++  }
++  void* reserved = nullptr;
++  if (sceKernelReserveVirtualRange(&reserved, size + kUnit, 0, kUnit) != 0 || !reserved) {
++    return false;
++  }
++  int64_t start = -1;
++  if (sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), size, kUnit, 12, &start) !=
++      0) {
++    sceKernelMunmap(reserved, size + kUnit);
++    return false;
++  }
++  void* base = static_cast<uint8_t*>(reserved) + kUnit;
++  void* mapped = base;
++  if (sceKernelMapDirectMemory(&mapped, size, 3 /* read, write */, 0x10 /* fixed */, start,
++                               kUnit) != 0 ||
++      mapped != base) {
++    if (mapped != base) sceKernelMunmap(mapped, size);
++    sceKernelMunmap(reserved, size + kUnit);
++    sceKernelReleaseDirectMemory(start, size);
++    return false;
++  }
++  out.base = base;
++  out.size = size;
++  return true;
++}
++
++inline void RetireDirectStack(DirectStack stack) {
++  stack.retired = std::chrono::steady_clock::now();
++  std::lock_guard<std::mutex> lock(g_direct_stack_mutex);
++  g_direct_stack_pool.push_back(stack);
++}
++#endif  // REX_PLATFORM_PS5
++
+ template <>
+ class PosixCondition<Thread> : public PosixConditionBase {
+   enum class State {
+@@ -626,10 +711,22 @@ class PosixCondition<Thread> : public PosixConditionBase {
+     pthread_attr_t attr;
+     if (pthread_attr_init(&attr) != 0)
+       return false;
++#if REX_PLATFORM_PS5
++    if (AcquireDirectStack(params.stack_size, direct_stack_)) {
++      if (pthread_attr_setstack(&attr, direct_stack_.base, direct_stack_.size) != 0) {
++        pthread_attr_destroy(&attr);
++        return false;
++      }
++    } else {
++      pthread_attr_destroy(&attr);
++      return false;
++    }
++#else
+     if (pthread_attr_setstacksize(&attr, params.stack_size) != 0) {
+       pthread_attr_destroy(&attr);
+       return false;
+     }
++#endif
+     if (params.initial_priority != 0) {
+       sched_param sched{};
+       sched.sched_priority = params.initial_priority + 1;
+@@ -668,6 +765,11 @@ class PosixCondition<Thread> : public PosixConditionBase {
+     // Match Canary/Edge behavior.
+     // Force-cancel/join from the condition destructor can self-join/crash
+     // depending on shutdown ordering, so threads must be stopped explicitly.
++#if REX_PLATFORM_PS5
++    if (direct_stack_.base && state_ == State::kFinished) {
++      RetireDirectStack(direct_stack_);
++    }
++#endif
+   }
+ 
+   bool Signal() override { return true; }
+@@ -690,9 +792,11 @@ class PosixCondition<Thread> : public PosixConditionBase {
+         std::strcpy(result.data(), android_pre_api_26_name_);
+       }
+ #else
++#if !REX_PLATFORM_PS5
+       if (pthread_getname_np(thread_, result.data(), result.size() - 1) != 0) {
+         assert_always();
+       }
++#endif
+ #endif
+     }
+     return std::string(result.data());
+@@ -704,8 +808,14 @@ class PosixCondition<Thread> : public PosixConditionBase {
+     if (state_ != State::kUninitialized && state_ != State::kFinished) {
+ #if REX_PLATFORM_MAC
+       if (pthread_equal(thread_, pthread_self())) {
+-        pthread_setname_np(std::string(name).c_str());
++      #if REX_PLATFORM_PS5
++  pthread_set_name_np(pthread_self(), std::string(name).c_str());
++#else
++  pthread_setname_np(std::string(name).c_str());
++#endif
+       }
++#elif REX_PLATFORM_PS5
++      pthread_set_name_np(thread_, std::string(name).c_str());
+ #else
+       pthread_setname_np(thread_, std::string(name).c_str());
+ #endif
+@@ -727,19 +837,23 @@ class PosixCondition<Thread> : public PosixConditionBase {
+ #endif
+ 
+   uint32_t system_id() const {
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_MAC || REX_PLATFORM_PS5
++#if REX_PLATFORM_PS5
++    return uint32_t(reinterpret_cast<uintptr_t>(thread_));
++#else
+     uint64_t thread_id;
+     if (pthread_threadid_np(thread_, &thread_id) != 0) {
+       return 0;
+     }
+     return static_cast<uint32_t>(thread_id);
++#endif
+ #else
+     return static_cast<uint32_t>(thread_);
+ #endif
+   }
+ 
+   uint64_t affinity_mask() {
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_MAC || REX_PLATFORM_PS5
+     return 0;
+ #else
+     WaitStarted();
+@@ -764,7 +878,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
+   }
+ 
+   void set_affinity_mask(uint64_t mask) {
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_MAC || REX_PLATFORM_PS5
+     (void)mask;
+ #else
+     WaitStarted();
+@@ -841,7 +955,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
+ #if REX_PLATFORM_ANDROID
+     int result = sigqueue(pthread_gettid_np(thread_),
+                           GetSystemSignal(SignalType::kThreadUserCallback), value);
+-#elif REX_PLATFORM_MAC
++#elif REX_PLATFORM_MAC || REX_PLATFORM_PS5
+     (void)value;
+     int result = pthread_kill(thread_, GetSystemSignal(SignalType::kThreadUserCallback));
+ #else
+@@ -985,6 +1099,9 @@ class PosixCondition<Thread> : public PosixConditionBase {
+     sem_destroy(&suspend_sem_);
+   }
+   pthread_t thread_;
++#if REX_PLATFORM_PS5
++  DirectStack direct_stack_;
++#endif
+   bool signaled_;
+   int exit_code_;
+   State state_;             // Protected by state_mutex_
+@@ -1459,8 +1576,12 @@ void Thread::Exit(int exit_code) {
+ }
+ 
+ void set_current_thread_name(const std::string_view name) {
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_MAC || REX_PLATFORM_PS5
++#if REX_PLATFORM_PS5
++  pthread_set_name_np(pthread_self(), std::string(name).c_str());
++#else
+   pthread_setname_np(std::string(name).c_str());
++#endif
+ #else
+   pthread_setname_np(pthread_self(), std::string(name).c_str());
+ #endif
+diff --git a/src/kernel/xam/xam_net.cpp b/src/kernel/xam/xam_net.cpp
+index 01cbfc2..0e50d9f 100644
+--- a/src/kernel/xam/xam_net.cpp
++++ b/src/kernel/xam/xam_net.cpp
+@@ -33,7 +33,7 @@
+ // NOTE: must be included last as it expects windows.h to already be included.
+ #define _WINSOCK_DEPRECATED_NO_WARNINGS  // inet_addr
+ #include <winsock2.h>                    // NOLINT(build/include_order)
+-#elif REX_PLATFORM_LINUX || REX_PLATFORM_MAC
++#elif REX_PLATFORM_LINUX || REX_PLATFORM_MAC || REX_PLATFORM_PS5
+ #include <arpa/inet.h>
+ #include <netinet/in.h>
+ #include <netinet/ip.h>
+diff --git a/src/system/CMakeLists.txt b/src/system/CMakeLists.txt
+index d01f0ed..fd693b7 100644
+--- a/src/system/CMakeLists.txt
++++ b/src/system/CMakeLists.txt
+@@ -45,7 +45,11 @@ set(REXSYSTEM_SOURCES
+     xex_module.cpp
+ )
+ 
+-add_library(rexruntime SHARED ${REXSYSTEM_SOURCES})
++if(PS5)
++    add_library(rexruntime STATIC ${REXSYSTEM_SOURCES})
++else()
++    add_library(rexruntime SHARED ${REXSYSTEM_SOURCES})
++endif()
+ add_library(rex::runtime ALIAS rexruntime)
+ add_library(rex::system ALIAS rexruntime)
+ add_library(rex::kernel ALIAS rexruntime)
+diff --git a/src/system/xmemory.cpp b/src/system/xmemory.cpp
+index cbd6535..2ad120b 100644
+--- a/src/system/xmemory.cpp
++++ b/src/system/xmemory.cpp
+@@ -174,6 +174,10 @@ bool Memory::Initialize() {
+   // Attempt to create our views. This may fail at the first address
+   // we pick, so try a few times.
+   mapping_base_ = 0;
++#if REX_PLATFORM_PS5
++  // Reserve first, outside RADV's GPU VA window, then map only into owned space.
++  if (!MapViews(nullptr)) mapping_base_ = views_.all_views[0];
++#else
+   for (size_t n = 32; n < 64; n++) {
+     auto mapping_base = reinterpret_cast<uint8_t*>(1ull << n);
+     if (!MapViews(mapping_base)) {
+@@ -181,6 +185,7 @@ bool Memory::Initialize() {
+       break;
+     }
+   }
++#endif
+ #if REX_PLATFORM_MAC
+   if (!mapping_base_) {
+     if (!MapViews(nullptr)) {
+@@ -352,7 +357,11 @@ constexpr size_t kGuestMappingLength = 0x120000000ull;
+ int Memory::MapViews(uint8_t* mapping_base) {
+   assert_true(rex::countof(map_info) == rex::countof(views_.all_views));
+ 
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_PS5
++  void* reservation = rex::memory::ReserveFileMappingRange(mapping_, kGuestMappingLength);
++  if (!reservation) return 1;
++  mapping_base = reinterpret_cast<uint8_t*>(reservation);
++#elif REX_PLATFORM_MAC
+   // macOS doesn't provide MAP_FIXED_NOREPLACE. Direct MAP_FIXED probing can
+   // overwrite unrelated host mappings, so first reserve the entire range as a
+   // hint and only proceed with a fixed base we own.
+@@ -380,7 +389,10 @@ int Memory::MapViews(uint8_t* mapping_base) {
+         rex::memory::PageAccess::kReadWrite, map_info[n].target_address & granularity_mask));
+     if (!views_.all_views[n]) {
+       // Failed, so bail and try again.
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_PS5
++      rex::memory::ReleaseFileMappingRange(mapping_, mapping_base, kGuestMappingLength);
++      std::fill(std::begin(views_.all_views), std::end(views_.all_views), nullptr);
++#elif REX_PLATFORM_MAC
+       munmap(mapping_base, kGuestMappingLength);
+       std::fill(std::begin(views_.all_views), std::end(views_.all_views), nullptr);
+ #else
+diff --git a/src/system/xsocket.cpp b/src/system/xsocket.cpp
+index 67753bf..3e0a08f 100644
+--- a/src/system/xsocket.cpp
++++ b/src/system/xsocket.cpp
+@@ -29,7 +29,7 @@
+ #include <netinet/in.h>
+ #include <netinet/ip.h>
+ #include <sys/socket.h>
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_MAC || REX_PLATFORM_PS5
+ #ifdef IPPROTO_TCP
+ #undef IPPROTO_TCP
+ #endif
+diff --git a/src/ui/CMakeLists.txt b/src/ui/CMakeLists.txt
+index 8b4b31d..042101a 100644
+--- a/src/ui/CMakeLists.txt
++++ b/src/ui/CMakeLists.txt
+@@ -68,6 +68,8 @@ if(WIN32)
+         window_win.cpp
+         windowed_app_context_win.cpp
+     )
++elseif(PS5)
++    set(REXUI_PLATFORM_SOURCES window_sdl.cpp windowed_app_context_sdl.cpp)
+ elseif(APPLE)
+     set(REXUI_PLATFORM_SOURCES
+         surface_sdl.cpp
+@@ -154,7 +156,7 @@ if(WIN32)
+         dxgi
+         dxguid
+     )
+-elseif(APPLE)
++elseif(APPLE OR PS5)
+     target_link_libraries(rexui PUBLIC SDL3::SDL3)
+ else()
+     find_package(PkgConfig REQUIRED)
+diff --git a/src/ui/vulkan/vulkan_instance.cpp b/src/ui/vulkan/vulkan_instance.cpp
+index 153cdb6..50e9771 100644
+--- a/src/ui/vulkan/vulkan_instance.cpp
++++ b/src/ui/vulkan/vulkan_instance.cpp
+@@ -29,6 +29,10 @@ REXCVAR_DEFINE_BOOL(vulkan_moltenvk_precise_math, true, "UI/Vulkan",
+                     "infinity and signed zero behavior the Xenos shader emulation relies on")
+     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ 
++#if REX_PLATFORM_PS5
++extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance, const char*);
++#endif
++
+ namespace rex {
+ namespace ui {
+ namespace vulkan {
+@@ -65,11 +69,13 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
+ 
+   vulkan_instance->renderdoc_api_ = RenderDocAPI::CreateIfConnected();
+ 
+-  // Load the loader library.
+-
+   Functions& ifn = vulkan_instance->functions_;
+-
+   bool functions_loaded = true;
++#if REX_PLATFORM_PS5
++  ifn.vkGetInstanceProcAddr = &::vk_icdGetInstanceProcAddr;
++  // vkDestroyInstance is loaded with a real instance below.
++#else
++  // Load the loader library.
+   if (!vulkan_instance->loader_.Load(platform::lib_names::kVulkanLoader)
+ #if REX_PLATFORM_MAC
+       && !vulkan_instance->loader_.Load(platform::lib_names::kVulkanLoaderFallback)
+@@ -89,6 +95,8 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
+     return nullptr;
+   }
+ 
++#endif
++
+   // Load global functions.
+ 
+   functions_loaded &= (ifn.vkCreateInstance = PFN_vkCreateInstance(
+@@ -140,6 +148,11 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
+   if (with_surface) {
+     // #1.
+     requested_extensions.emplace("VK_KHR_surface", &vulkan_instance->extensions_.ext_KHR_surface);
++#if REX_PLATFORM_PS5
++    // #3. The console has no window system; the driver presents to the
++    // display itself.
++    requested_extensions.emplace("VK_KHR_display", &vulkan_instance->extensions_.ext_KHR_display);
++#endif
+ #ifdef VK_USE_PLATFORM_XCB_KHR
+     // #6.
+     requested_extensions.emplace("VK_KHR_xcb_surface",
+@@ -392,6 +405,13 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
+     return nullptr;
+   }
+ 
++#if REX_PLATFORM_PS5
++  if (!ifn.vkDestroyInstance) {
++    ifn.vkDestroyInstance = PFN_vkDestroyInstance(
++        ifn.vkGetInstanceProcAddr(vulkan_instance->instance_, "vkDestroyInstance"));
++  }
++#endif
++
+   // Load instance functions.
+ 
+ #define XE_UI_VULKAN_FUNCTION(name)                                                            \
+diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
+index b404ec8..5ee3fd9 100644
+--- a/src/ui/vulkan/vulkan_presenter.cpp
++++ b/src/ui/vulkan/vulkan_presenter.cpp
+@@ -47,6 +47,10 @@
+ #include <rex/ui/surface_win.h>
+ #endif
+ 
++#if REX_PLATFORM_PS5
++#include <rex/ui/surface_ps5.h>
++#endif
++
+ REXCVAR_DEFINE_BOOL(present_render_pass_clear, true, "UI/Presenter",
+                     "Clear render pass during presentation");
+ 
+@@ -173,6 +177,96 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL FfxVkGetDeviceProcAddrCompat(VkDevice d
+ }  // namespace
+ #endif  // defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
+ 
++#if REX_PLATFORM_PS5
++// Paints so far, for the host's frame-rate figures.
++std::atomic<uint64_t> g_ps5_paint_count{0};
++uint64_t Ps5PresentCount() {
++  return g_ps5_paint_count.load(std::memory_order_relaxed);
++}
++
++namespace {
++
++// A VK_KHR_display surface on the console's display: the first display, the
++// mode whose visible region is the requested size (the first mode if none
++// is), on the first plane. Everything found is logged, since what the driver
++// reports is only known from running it.
++VkResult CreatePs5DisplaySurface(PFN_vkGetInstanceProcAddr get_instance_proc_addr,
++                                 VkInstance instance, VkPhysicalDevice physical_device,
++                                 uint32_t width, uint32_t height, VkSurfaceKHR* surface_out) {
++  const auto get_displays = PFN_vkGetPhysicalDeviceDisplayPropertiesKHR(
++      get_instance_proc_addr(instance, "vkGetPhysicalDeviceDisplayPropertiesKHR"));
++  const auto get_modes = PFN_vkGetDisplayModePropertiesKHR(
++      get_instance_proc_addr(instance, "vkGetDisplayModePropertiesKHR"));
++  const auto get_planes = PFN_vkGetPhysicalDeviceDisplayPlanePropertiesKHR(
++      get_instance_proc_addr(instance, "vkGetPhysicalDeviceDisplayPlanePropertiesKHR"));
++  const auto create_surface = PFN_vkCreateDisplayPlaneSurfaceKHR(
++      get_instance_proc_addr(instance, "vkCreateDisplayPlaneSurfaceKHR"));
++  if (!get_displays || !get_modes || !get_planes || !create_surface) {
++    REXLOG_ERROR("VulkanPresenter: the driver has no VK_KHR_display entry points");
++    return VK_ERROR_EXTENSION_NOT_PRESENT;
++  }
++
++  uint32_t display_count = 0;
++  get_displays(physical_device, &display_count, nullptr);
++  std::vector<VkDisplayPropertiesKHR> displays(display_count);
++  if (!display_count ||
++      get_displays(physical_device, &display_count, displays.data()) < VK_SUCCESS) {
++    REXLOG_ERROR("VulkanPresenter: no display reported by the driver");
++    return VK_ERROR_INITIALIZATION_FAILED;
++  }
++  const VkDisplayPropertiesKHR& display = displays[0];
++  REXLOG_INFO("VulkanPresenter: {} display(s); using '{}', {}x{}", display_count,
++              display.displayName ? display.displayName : "",
++              display.physicalResolution.width, display.physicalResolution.height);
++
++  uint32_t mode_count = 0;
++  get_modes(physical_device, display.display, &mode_count, nullptr);
++  std::vector<VkDisplayModePropertiesKHR> modes(mode_count);
++  if (!mode_count ||
++      get_modes(physical_device, display.display, &mode_count, modes.data()) < VK_SUCCESS) {
++    REXLOG_ERROR("VulkanPresenter: the display reports no modes");
++    return VK_ERROR_INITIALIZATION_FAILED;
++  }
++  const VkDisplayModePropertiesKHR* chosen = nullptr;
++  for (const VkDisplayModePropertiesKHR& mode : modes) {
++    REXLOG_INFO("VulkanPresenter: display mode {}x{} at {} mHz", mode.parameters.visibleRegion.width,
++                mode.parameters.visibleRegion.height, mode.parameters.refreshRate);
++    if (!chosen && mode.parameters.visibleRegion.width == width &&
++        mode.parameters.visibleRegion.height == height && mode.parameters.refreshRate <= 60000) {
++      chosen = &mode;
++    }
++  }
++  if (!chosen) {
++    chosen = &modes[0];
++    REXLOG_WARN("VulkanPresenter: no {}x{} display mode; using the first one", width, height);
++  }
++
++  uint32_t plane_count = 0;
++  get_planes(physical_device, &plane_count, nullptr);
++  if (!plane_count) {
++    REXLOG_ERROR("VulkanPresenter: the driver reports no display planes");
++    return VK_ERROR_INITIALIZATION_FAILED;
++  }
++
++  VkDisplaySurfaceCreateInfoKHR create_info = {};
++  create_info.sType = VK_STRUCTURE_TYPE_DISPLAY_SURFACE_CREATE_INFO_KHR;
++  create_info.displayMode = chosen->displayMode;
++  create_info.planeIndex = 0;
++  create_info.planeStackIndex = 0;
++  create_info.transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
++  create_info.globalAlpha = 1.0f;
++  create_info.alphaMode = VK_DISPLAY_PLANE_ALPHA_OPAQUE_BIT_KHR;
++  create_info.imageExtent = chosen->parameters.visibleRegion;
++  const VkResult result = create_surface(instance, &create_info, nullptr, surface_out);
++  REXLOG_INFO("VulkanPresenter: display surface {}x{} at {} mHz, {} plane(s): result {}",
++              create_info.imageExtent.width, create_info.imageExtent.height,
++              chosen->parameters.refreshRate, plane_count, static_cast<int>(result));
++  return result;
++}
++
++}  // namespace
++#endif  // REX_PLATFORM_PS5
++
+ // Generated with `xb buildshaders`.
+ namespace shaders {
+ #include "../shaders/vulkan_spirv/guest_output_bilinear_dither_ps.h"
+@@ -513,6 +607,9 @@ Surface::TypeFlags VulkanPresenter::GetSurfaceTypesSupportedByInstance(
+   if (instance_extensions.ext_KHR_win32_surface) {
+     type_flags |= Surface::kTypeFlag_Win32Hwnd;
+   }
++#endif
++#if REX_PLATFORM_PS5
++  if (instance_extensions.ext_KHR_display) type_flags |= Surface::kTypeFlag_Ps5Display;
+ #endif
+   return type_flags;
+ }
+@@ -923,6 +1020,13 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+         vulkan_surface_create_result = ifn.vkCreateMetalSurfaceEXT(
+             instance, &surface_create_info, nullptr, &paint_context_.vulkan_surface);
+       } break;
++#endif
++#if REX_PLATFORM_PS5
++      case Surface::kTypeIndex_Ps5Display: {
++        vulkan_surface_create_result = CreatePs5DisplaySurface(
++            ifn.vkGetInstanceProcAddr, instance, vulkan_device_->physical_device(),
++            new_surface_width, new_surface_height, &paint_context_.vulkan_surface);
++      } break;
+ #endif
+       default:
+         assert_unhandled_case(surface_type);
+diff --git a/src/ui/window_sdl.cpp b/src/ui/window_sdl.cpp
+index 5a0f46f..5406e4b 100644
+--- a/src/ui/window_sdl.cpp
++++ b/src/ui/window_sdl.cpp
+@@ -12,7 +12,11 @@
+ #include <rex/graphics/video_mode_util.h>
+ #include <rex/logging.h>
+ #include <rex/platform.h>
++#if REX_PLATFORM_PS5
++#include <rex/ui/surface_ps5.h>
++#else
+ #include <rex/ui/surface_sdl.h>
++#endif
+ #include <rex/ui/virtual_key.h>
+ 
+ #include <SDL3/SDL_hints.h>
+@@ -345,11 +349,13 @@ SDLWindow::~SDLWindow() {
+   if (window_) {
+     WindowMap().erase(SDL_GetWindowID(window_));
+   }
++#if !REX_PLATFORM_PS5
+   if (metal_view_) {
+     SDL_Metal_DestroyView(metal_view_);
+     metal_view_ = nullptr;
+     metal_layer_ = nullptr;
+   }
++#endif
+   if (window_) {
+     SDL_DestroyWindow(window_);
+     window_ = nullptr;
+@@ -437,6 +443,7 @@ bool SDLWindow::OpenImpl() {
+ 
+   WindowMap().emplace(SDL_GetWindowID(window_), this);
+ 
++#if !REX_PLATFORM_PS5
+   metal_view_ = SDL_Metal_CreateView(window_);
+   if (!metal_view_) {
+     REXLOG_ERROR("SDLWindow: Failed to create Metal view: {}", SDL_GetError());
+@@ -456,6 +463,8 @@ bool SDLWindow::OpenImpl() {
+     return false;
+   }
+ 
++#endif
++
+   dpi_ = QueryDpi();
+   SDL_ShowWindow(window_);
+   if (IsMouseCaptureRequested()) {
+@@ -477,11 +486,13 @@ void SDLWindow::RequestCloseImpl() {
+   OnBeforeClose(destruction_receiver);
+   if (!destruction_receiver.IsWindowDestroyed()) {
+     RemoveCursorAutoHideTimer();
++#if !REX_PLATFORM_PS5
+     if (metal_view_) {
+       SDL_Metal_DestroyView(metal_view_);
+       metal_view_ = nullptr;
+       metal_layer_ = nullptr;
+     }
++#endif
+     if (window_) {
+       WindowMap().erase(SDL_GetWindowID(window_));
+       SDL_DestroyWindow(window_);
+@@ -541,10 +552,15 @@ void SDLWindow::FocusImpl() {
+ }
+ 
+ std::unique_ptr<Surface> SDLWindow::CreateSurfaceImpl(Surface::TypeFlags allowed_types) {
++#if REX_PLATFORM_PS5
++  if (allowed_types & Surface::kTypeFlag_Ps5Display) return std::make_unique<Ps5DisplaySurface>(1920, 1080);
++  return nullptr;
++#else
+   if (!(allowed_types & Surface::kTypeFlag_SDLMetalView)) {
+     return nullptr;
+   }
+   return std::make_unique<SDLMetalViewSurface>(window_, metal_view_, metal_layer_);
++#endif
+ }
+ 
+ void SDLWindow::RequestPaintImpl() {
+diff --git a/thirdparty/CMakeLists.txt b/thirdparty/CMakeLists.txt
+index f076b0d..42ae6e2 100644
+--- a/thirdparty/CMakeLists.txt
++++ b/thirdparty/CMakeLists.txt
+@@ -63,7 +63,8 @@ if(REXGLUE_BUILD_TESTS)
+ endif()
+ 
+ foreach(submodule ${REQUIRED_SUBMODULES})
+-    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${submodule}/.git")
++    if(NOT IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/${submodule}" OR
++       (NOT PS5 AND NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${submodule}/.git"))
+         message(FATAL_ERROR
+             "Git submodule '${submodule}' is not initialized.\n"
+             "Please run: git submodule update --init --recursive\n"
+@@ -280,7 +281,7 @@ set(SDL_TEST OFF CACHE BOOL "" FORCE)
+ set(SDL_UNIX_CONSOLE_BUILD ON CACHE BOOL "" FORCE)
+ 
+ # Disable unused subsystems
+-if(APPLE)
++if(APPLE OR PS5)
+     set(SDL_VIDEO ON CACHE BOOL "" FORCE)
+ else()
+     set(SDL_VIDEO OFF CACHE BOOL "" FORCE)
+@@ -313,7 +314,7 @@ set(SDL_DUMMYAUDIO OFF CACHE BOOL "" FORCE)
+ set(SDL_DUMMYVIDEO OFF CACHE BOOL "" FORCE)
+ 
+ # Linux audio backends
+-if(UNIX AND NOT APPLE)
++if(UNIX AND NOT APPLE AND NOT PS5)
+     set(SDL_ALSA              ON  CACHE BOOL "" FORCE)
+     set(SDL_ALSA_SHARED       ON  CACHE BOOL "" FORCE)
+     set(SDL_PULSEAUDIO        ON  CACHE BOOL "" FORCE)
+@@ -322,6 +323,16 @@ if(UNIX AND NOT APPLE)
+     set(SDL_PIPEWIRE_SHARED   ON  CACHE BOOL "" FORCE)
+ endif()
+ 
++if(PS5)
++    # Headers declare these; the native-title support binds their implementations.
++    set(HAVE_GETRESUID 1 CACHE INTERNAL "" FORCE)
++    set(HAVE_GETRESGID 1 CACHE INTERNAL "" FORCE)
++    set(SDL_OFFSCREEN ON CACHE BOOL "" FORCE)
++    set(SDL_AUDIO OFF CACHE BOOL "" FORCE)
++    set(SDL_KMSDRM OFF CACHE BOOL "" FORCE)
++    set(SDL_X11 OFF CACHE BOOL "" FORCE)
++    set(SDL_WAYLAND OFF CACHE BOOL "" FORCE)
++endif()
+ add_subdirectory(sdl3)
+ 
+ #=============================================================================
+diff --git a/thirdparty/crypto/sha256.cpp b/thirdparty/crypto/sha256.cpp
+index 0ecbf41..e4712ed 100644
+--- a/thirdparty/crypto/sha256.cpp
++++ b/thirdparty/crypto/sha256.cpp
+@@ -9,7 +9,7 @@
+ 
+ // big endian architectures need #define __BYTE_ORDER __BIG_ENDIAN
+ #ifndef _MSC_VER
+-#ifdef __APPLE__
++#if defined(__APPLE__) || defined(__PROSPERO__)
+ #include <machine/endian.h>
+ #ifndef __BYTE_ORDER
+ #define __BYTE_ORDER BYTE_ORDER

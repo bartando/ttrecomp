@@ -1,0 +1,246 @@
+diff --git a/include/rex/perf/thread_cpu.h b/include/rex/perf/thread_cpu.h
+new file mode 100644
+index 0000000..e593c46
+--- /dev/null
++++ b/include/rex/perf/thread_cpu.h
+@@ -0,0 +1,17 @@
++#pragma once
++
++#include <cstdint>
++#include <string_view>
++
++// Per-thread CPU accounting for the PERF diagnostics. Only implemented on PS5,
++// where whole-process CPU percentages hide a single saturated thread.
++namespace rex::perf::thread_cpu {
++
++void RegisterCurrentThread();
++void UnregisterCurrentThread();
++// `thread` is the native thread handle (pthread_t) as an integer.
++void SetThreadName(uintptr_t thread, std::string_view name);
++// Logs the busiest threads since the previous call; zero window only primes.
++void Log(double window_seconds);
++
++}  // namespace rex::perf::thread_cpu
+diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
+index b3a5a5a..c15893c 100644
+--- a/src/core/CMakeLists.txt
++++ b/src/core/CMakeLists.txt
+@@ -14,6 +14,7 @@ add_library(rexcore OBJECT
+     guest_presence.cpp
+     logging.cpp
+     perf/hitch_diagnostics.cpp
++    perf/thread_cpu.cpp
+     memory.cpp
+     mutex.cpp
+     ring_buffer.cpp
+diff --git a/src/core/perf/hitch_diagnostics.cpp b/src/core/perf/hitch_diagnostics.cpp
+index 80c2a46..a286d98 100644
+--- a/src/core/perf/hitch_diagnostics.cpp
++++ b/src/core/perf/hitch_diagnostics.cpp
+@@ -1,4 +1,5 @@
+ #include <rex/perf/hitch_diagnostics.h>
++#include <rex/perf/thread_cpu.h>
+ 
+ #include <algorithm>
+ #include <array>
+@@ -42,6 +43,7 @@ Sample TakeSample(OperationCounters& counters) {
+ }
+ 
+ void LogHostContext(double elapsed_seconds) {
++  thread_cpu::Log(elapsed_seconds);
+ #if REX_PLATFORM_MAC
+   rusage usage{};
+   static double previous_cpu_seconds = 0.0;
+diff --git a/src/core/perf/thread_cpu.cpp b/src/core/perf/thread_cpu.cpp
+new file mode 100644
+index 0000000..96a0604
+--- /dev/null
++++ b/src/core/perf/thread_cpu.cpp
+@@ -0,0 +1,142 @@
++#include <rex/perf/thread_cpu.h>
++
++#include <rex/platform.h>
++
++#if REX_PLATFORM_PS5
++#include <pthread.h>
++#include <pthread_np.h>
++#include <sys/resource.h>
++#include <time.h>
++
++#include <algorithm>
++#include <atomic>
++#include <mutex>
++#include <string>
++#include <vector>
++
++#include <fmt/format.h>
++#include <rex/logging.h>
++#endif
++
++namespace rex::perf::thread_cpu {
++
++#if REX_PLATFORM_PS5
++namespace {
++
++struct Entry {
++  uintptr_t thread;
++  long tid;
++  clockid_t clock;
++  std::string name;
++  int64_t last_ns;
++};
++
++std::mutex mutex;
++std::vector<Entry> entries;
++int64_t last_process_ns = -1;
++
++int64_t ClockNs(clockid_t clock) {
++  timespec time{};
++  if (clock_gettime(clock, &time) != 0) return -1;
++  return int64_t(time.tv_sec) * 1000000000 + time.tv_nsec;
++}
++
++int64_t ProcessCpuNs() {
++  rusage usage{};
++  if (getrusage(RUSAGE_SELF, &usage) != 0) return -1;
++  return (int64_t(usage.ru_utime.tv_sec) + usage.ru_stime.tv_sec) * 1000000000 +
++         (int64_t(usage.ru_utime.tv_usec) + usage.ru_stime.tv_usec) * 1000;
++}
++
++}  // namespace
++
++void RegisterCurrentThread() {
++  const long tid = pthread_getthreadid_np();
++  // libkernel's pthread_getcpuclockid hands back a clock that always reads the
++  // calling thread, so build FreeBSD's per-thread CPU clock id (CPUCLOCK_BIT |
++  // tid) directly; the kernel resolves it to that thread from any caller.
++  const clockid_t clock = clockid_t(0x80000000u | uint32_t(tid));
++  static std::atomic<bool> reported = false;
++  if (ClockNs(clock) < 0) {
++    if (!reported.exchange(true)) {
++      REXLOG_WARN("PERF threads: thread CPU clock {:#x} unavailable", uint32_t(clock));
++    }
++    return;
++  }
++  const uintptr_t thread = uintptr_t(pthread_self());
++  std::lock_guard lock(mutex);
++  for (auto& entry : entries) {
++    if (entry.thread == thread) {
++      entry = {thread, tid, clock, std::move(entry.name), ClockNs(clock)};
++      return;
++    }
++  }
++  entries.push_back({thread, tid, clock, {}, ClockNs(clock)});
++}
++
++void UnregisterCurrentThread() {
++  const uintptr_t thread = uintptr_t(pthread_self());
++  std::lock_guard lock(mutex);
++  std::erase_if(entries, [thread](const Entry& entry) { return entry.thread == thread; });
++}
++
++void SetThreadName(uintptr_t thread, std::string_view name) {
++  std::lock_guard lock(mutex);
++  for (auto& entry : entries) {
++    if (entry.thread == thread) {
++      entry.name = name;
++      return;
++    }
++  }
++}
++
++void Log(double window_seconds) {
++  struct Usage {
++    double percent;
++    const Entry* entry;
++  };
++  std::vector<Usage> usage;
++  double registered = 0.0;
++  std::lock_guard lock(mutex);
++  for (auto& entry : entries) {
++    const int64_t now = ClockNs(entry.clock);
++    if (now < 0) continue;
++    if (window_seconds > 0.0 && entry.last_ns >= 0) {
++      const double percent = 100.0 * double(now - entry.last_ns) / (window_seconds * 1e9);
++      registered += percent;
++      usage.push_back({percent, &entry});
++    }
++    entry.last_ns = now;
++  }
++  const int64_t process_now = ProcessCpuNs();
++  const int64_t process_before = last_process_ns;
++  last_process_ns = process_now;
++  if (window_seconds <= 0.0) return;
++
++  std::sort(usage.begin(), usage.end(),
++            [](const Usage& a, const Usage& b) { return a.percent > b.percent; });
++  std::string top;
++  for (size_t i = 0; i < usage.size() && i < 10 && usage[i].percent >= 1.0; ++i) {
++    const Entry& entry = *usage[i].entry;
++    fmt::format_to(std::back_inserter(top), "{}{}[{}]={:.0f}%", top.empty() ? "" : " ",
++                   entry.name.empty() ? "unnamed" : entry.name, entry.tid, usage[i].percent);
++  }
++  const double process = process_now >= 0 && process_before >= 0
++                             ? 100.0 * double(process_now - process_before) / (window_seconds * 1e9)
++                             : -1.0;
++  // 100% = one full core. process minus registered is CPU spent on threads
++  // this registry never saw (process main thread, driver threads).
++  REXLOG_INFO("PERF threads: process_pct={:.0f} registered_pct={:.0f} threads={} top: {}",
++              process, registered, usage.size(), top);
++}
++
++#else
++
++void RegisterCurrentThread() {}
++void UnregisterCurrentThread() {}
++void SetThreadName(uintptr_t, std::string_view) {}
++void Log(double) {}
++
++#endif
++
++}  // namespace rex::perf::thread_cpu
+diff --git a/src/core/threading_posix.cpp b/src/core/threading_posix.cpp
+index 1d61e1a..1e994b6 100644
+--- a/src/core/threading_posix.cpp
++++ b/src/core/threading_posix.cpp
+@@ -40,6 +40,7 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC || REX_PLATFORM_PS5, "This
+ #include <rex/assert.h>
+ #include <rex/chrono/chrono_steady_cast.h>
+ #include <rex/logging.h>
++#include <rex/perf/thread_cpu.h>
+ #include <rex/thread/timer_queue.h>
+ 
+ #include <sched.h>
+@@ -804,6 +805,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
+ 
+   void set_name(const std::string& name) {
+     WaitStarted();
++    perf::thread_cpu::SetThreadName(uintptr_t(thread_), name);
+     std::unique_lock<std::mutex> lock(state_mutex_);
+     if (state_ != State::kUninitialized && state_ != State::kFinished) {
+ #if REX_PLATFORM_MAC
+@@ -1486,6 +1488,8 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
+ 
+   current_thread_ = thread;
+   current_thread_condition_ = &thread->handle_;
++  // Before the started state is published, so set_name() finds the entry.
++  perf::thread_cpu::RegisterCurrentThread();
+   {
+     // The suspend count must be published together with the state: Resume()
+     // can run as soon as WaitStarted() sees it, and would otherwise find a
+@@ -1518,6 +1522,7 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
+     thread->handle_.cond_.notify_all();
+   }
+ 
++  perf::thread_cpu::UnregisterCurrentThread();
+   current_thread_ = nullptr;
+   current_thread_condition_ = nullptr;
+   return nullptr;
+@@ -1576,6 +1581,7 @@ void Thread::Exit(int exit_code) {
+ }
+ 
+ void set_current_thread_name(const std::string_view name) {
++  perf::thread_cpu::SetThreadName(uintptr_t(pthread_self()), name);
+ #if REX_PLATFORM_MAC || REX_PLATFORM_PS5
+ #if REX_PLATFORM_PS5
+   pthread_set_name_np(pthread_self(), std::string(name).c_str());

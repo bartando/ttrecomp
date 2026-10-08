@@ -1,0 +1,162 @@
+diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
+index b93c3c6..ca97206 100644
+--- a/include/rex/graphics/command_processor.h
++++ b/include/rex/graphics/command_processor.h
+@@ -205,6 +205,11 @@ class CommandProcessor {
+   bool ExecutePacketType3_MEM_WRITE(memory::RingBuffer* reader, uint32_t packet, uint32_t count);
+   bool ExecutePacketType3_COND_WRITE(memory::RingBuffer* reader, uint32_t packet, uint32_t count);
+   bool ExecutePacketType3_EVENT_WRITE(memory::RingBuffer* reader, uint32_t packet, uint32_t count);
++  // Writes an EVENT_WRITE_SHD fence value once the host GPU has finished the
++  // work before it, instead of when the packet is processed. Needed where the
++  // GPU reads guest memory directly: the guest reuses buffers as soon as it
++  // sees the fence. Returns false if the backend writes it immediately.
++  virtual bool WriteFenceOnGpuTimeline(uint32_t address, uint32_t value) { return false; }
+   bool ExecutePacketType3_EVENT_WRITE_SHD(memory::RingBuffer* reader, uint32_t packet,
+                                           uint32_t count);
+   bool ExecutePacketType3_EVENT_WRITE_EXT(memory::RingBuffer* reader, uint32_t packet,
+diff --git a/include/rex/graphics/shared_memory.h b/include/rex/graphics/shared_memory.h
+index e77eb5b..a98666e 100644
+--- a/include/rex/graphics/shared_memory.h
++++ b/include/rex/graphics/shared_memory.h
+@@ -132,6 +132,7 @@ class SharedMemory {
+   // Advances the frame index that hot-page detection counts streaks in. In
+   // zero-copy mode also fires the watches on hot pages (see zero_copy_).
+   void OnFrameEnd();
++  bool zero_copy() const { return zero_copy_; }
+ 
+  protected:
+   // Whether moving an upload ahead of earlier work in the window could change
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+index 3c5b6e1..b613c30 100644
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -904,6 +904,7 @@ class VulkanCommandProcessor : public CommandProcessor {
+   uint32_t submission_timer_next_slot_ = 0;
+   uint64_t submission_timer_work_ns_ = 0;
+   uint64_t submission_timer_count_ = 0;
++  bool WriteFenceOnGpuTimeline(uint32_t address, uint32_t value) override;
+   void FrameTimerBeginFrame();
+   void FrameTimerEndFrame();
+   uint32_t SubmissionTimerBegin(VkCommandBuffer command_buffer);
+diff --git a/include/rex/graphics/vulkan/deferred_command_buffer.h b/include/rex/graphics/vulkan/deferred_command_buffer.h
+index fe1c217..21e65ac 100644
+--- a/include/rex/graphics/vulkan/deferred_command_buffer.h
++++ b/include/rex/graphics/vulkan/deferred_command_buffer.h
+@@ -311,6 +311,15 @@ class DeferredCommandBuffer {
+   void CmdVkBeginRendering(const VkRenderingInfo* rendering_info);
+   void CmdVkEndRendering() { WriteCommand(Command::kVkEndRendering, 0); }
+ 
++  void CmdVkFillBuffer(VkBuffer buffer, VkDeviceSize offset, VkDeviceSize size, uint32_t data) {
++    auto& args = *reinterpret_cast<ArgsVkFillBuffer*>(
++        WriteCommand(Command::kVkFillBuffer, sizeof(ArgsVkFillBuffer)));
++    args.buffer = buffer;
++    args.offset = offset;
++    args.size = size;
++    args.data = data;
++  }
++
+   void CmdVkResetQueryPool(VkQueryPool query_pool, uint32_t first_query, uint32_t query_count) {
+     auto& args = *reinterpret_cast<ArgsVkResetQueryPool*>(
+         WriteCommand(Command::kVkResetQueryPool, sizeof(ArgsVkResetQueryPool)));
+@@ -451,6 +460,7 @@ class DeferredCommandBuffer {
+     kVkEndRenderPass,
+     kVkBeginRendering,
+     kVkEndRendering,
++    kVkFillBuffer,
+     kVkPipelineBarrier,
+     kVkPushConstants,
+     kVkPushUniformBufferDescriptorSet,
+@@ -620,6 +630,13 @@ class DeferredCommandBuffer {
+     uint32_t query;
+   };
+ 
++  struct ArgsVkFillBuffer {
++    VkBuffer buffer;
++    VkDeviceSize offset;
++    VkDeviceSize size;
++    uint32_t data;
++  };
++
+   struct ArgsVkResetQueryPool {
+     VkQueryPool query_pool;
+     uint32_t first_query;
+diff --git a/include/rex/ui/vulkan/functions/device_1_0.inc b/include/rex/ui/vulkan/functions/device_1_0.inc
+index c72fdd8..c7f9554 100644
+--- a/include/rex/ui/vulkan/functions/device_1_0.inc
++++ b/include/rex/ui/vulkan/functions/device_1_0.inc
+@@ -23,6 +23,7 @@ XE_UI_VULKAN_FUNCTION(vkCmdDrawIndexed)
+ XE_UI_VULKAN_FUNCTION(vkCmdEndRenderPass)
+ XE_UI_VULKAN_FUNCTION(vkCmdBeginQuery)
+ XE_UI_VULKAN_FUNCTION(vkCmdEndQuery)
++XE_UI_VULKAN_FUNCTION(vkCmdFillBuffer)
+ XE_UI_VULKAN_FUNCTION(vkCmdPipelineBarrier)
+ XE_UI_VULKAN_FUNCTION(vkCmdPushConstants)
+ XE_UI_VULKAN_FUNCTION(vkCmdResetQueryPool)
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index cbe4aea..3ad809f 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -1622,7 +1622,9 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_SHD(memory::RingBuffer* re
+   auto endianness = static_cast<xenos::Endian>(address & 0x3);
+   address &= ~0x3;
+   data_value = GpuSwap(data_value, endianness);
+-  memory::store(memory_->TranslatePhysical(address), data_value);
++  if (!WriteFenceOnGpuTimeline(address, data_value)) {
++    memory::store(memory_->TranslatePhysical(address), data_value);
++  }
+   trace_writer_.WriteMemoryWrite(CpuToGpu(address), 4);
+   return true;
+ }
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 3ed8337..fb9f24b 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -9961,6 +9961,32 @@ void VulkanCommandProcessor::ShutdownGpuTimestampResources() {
+   }
+ }
+ 
++bool VulkanCommandProcessor::WriteFenceOnGpuTimeline(uint32_t address, uint32_t value) {
++  if (!shared_memory_ || !shared_memory_->zero_copy() || !BeginSubmission(true)) {
++    return false;
++  }
++  EndRenderPass();
++  // Everything before the fence must be done with guest memory first.
++  VkMemoryBarrier before = {};
++  before.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
++  before.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
++  before.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++  deferred_command_buffer_.CmdVkPipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
++                                                VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0,
++                                                nullptr, 0, nullptr);
++  // The guest stores the swapped value as raw bytes; fill writes the same.
++  deferred_command_buffer_.CmdVkFillBuffer(shared_memory_->buffer(), address & 0x1FFFFFFF, 4,
++                                           value);
++  VkMemoryBarrier after = {};
++  after.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
++  after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++  after.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
++  deferred_command_buffer_.CmdVkPipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
++                                                VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &after, 0,
++                                                nullptr, 0, nullptr);
++  return true;
++}
++
+ void VulkanCommandProcessor::FrameTimerBeginFrame() {
+   if (!REXCVAR_GET(vulkan_gpu_frame_timer)) {
+     return;
+diff --git a/src/graphics/vulkan/deferred_command_buffer.cpp b/src/graphics/vulkan/deferred_command_buffer.cpp
+index 9e2136c..cd5e826 100644
+--- a/src/graphics/vulkan/deferred_command_buffer.cpp
++++ b/src/graphics/vulkan/deferred_command_buffer.cpp
+@@ -428,6 +428,11 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
+                                       args.set, write_count, writes);
+       } break;
+ 
++      case Command::kVkFillBuffer: {
++        auto& args = *reinterpret_cast<const ArgsVkFillBuffer*>(stream);
++        dfn.vkCmdFillBuffer(command_buffer, args.buffer, args.offset, args.size, args.data);
++      } break;
++
+       case Command::kVkResetQueryPool: {
+         auto& args = *reinterpret_cast<const ArgsVkResetQueryPool*>(stream);
+         dfn.vkCmdResetQueryPool(command_buffer, args.query_pool, args.first_query,

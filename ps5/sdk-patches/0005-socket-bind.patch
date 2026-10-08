@@ -1,0 +1,101 @@
+--- a/src/core/socket_posix.cpp
++++ b/src/core/socket_posix.cpp
+@@ -3,9 +3,12 @@
+ 
+ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC || REX_PLATFORM_PS5, "This file is POSIX-only");
+ 
++#include <fcntl.h>
+ #include <sys/ioctl.h>
+ #include <unistd.h>
+ 
++#include <cstring>
++
+ namespace rex::net {
+ 
+ int socket_close(SocketHandle handle) {
+@@ -13,6 +16,22 @@
+ }
+ 
+ int socket_ioctl(SocketHandle handle, uint32_t cmd, uint8_t* arg) {
++#if REX_PLATFORM_PS5
++  // The title sandbox refuses socket ioctls with EACCES. FIONBIO is the one
++  // titles rely on; the guest's u32 flag is big-endian, so test it as raw bytes.
++  constexpr uint32_t kFionbio = 0x8004667E;
++  if (cmd == kFionbio) {
++    uint32_t enable;
++    std::memcpy(&enable, arg, sizeof(enable));
++    int fd = static_cast<int>(handle);
++    int flags = fcntl(fd, F_GETFL);
++    if (flags < 0) {
++      return -1;
++    }
++    flags = enable ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);
++    return fcntl(fd, F_SETFL, flags);
++  }
++#endif
+   return ioctl(static_cast<int>(handle), cmd, arg);
+ }
+ 
+--- a/src/system/xsocket.cpp
++++ b/src/system/xsocket.cpp
+@@ -9,9 +9,11 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <cerrno>
+ #include <cstring>
+ 
+ #include <rex/kernel/xam/module.h>
++#include <rex/logging.h>
+ #include <rex/platform.h>
+ #include <rex/system/kernel_state.h>
+ #include <rex/system/xsocket.h>
+@@ -62,6 +64,8 @@
+ 
+   native_handle_ = socket(af, type, proto);
+   if (native_handle_ == -1) {
++    REXSYS_WARN("socket({}, {}, {}) failed: errno {}", uint32_t(af), uint32_t(type), uint32_t(proto),
++                errno);
+     return X_STATUS_UNSUCCESSFUL;
+   }
+ 
+@@ -101,6 +105,7 @@
+ X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
+   int ret = rex::net::socket_ioctl(native_handle_, cmd, arg_ptr);
+   if (ret < 0) {
++    REXSYS_WARN("socket ioctl {:08X} failed: errno {}", cmd, errno);
+     // TODO: Get last error
+     return X_STATUS_UNSUCCESSFUL;
+   }
+@@ -118,8 +123,31 @@
+ }
+ 
+ X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
++#if REX_PLATFORM_MAC || REX_PLATFORM_PS5
++  // BSD sockaddrs start with sin_len; N_XSOCKADDR_IN's 16-bit family does not
++  // match that layout, so build the native address explicitly.
++  sockaddr_in native = {};
++  native.sin_len = sizeof(native);
++  native.sin_family = AF_INET;
++  std::memcpy(&native.sin_port, &name->sin_port, sizeof(native.sin_port));
++  std::memcpy(&native.sin_addr, &name->sin_addr, sizeof(native.sin_addr));
++  int ret = bind(native_handle_, reinterpret_cast<sockaddr*>(&native), sizeof(native));
++#if REX_PLATFORM_PS5
++  // Titles are not root, and FreeBSD reserves ports below 1024. Xbox titles
++  // bind there freely (Table Tennis uses VDP port 1001), so fall back to an
++  // ephemeral port; cross-console system link is out of reach anyway.
++  if (ret < 0 && errno == EACCES && ntohs(native.sin_port) < 1024) {
++    REXSYS_WARN("bind to reserved port {} refused; using an ephemeral port",
++                ntohs(native.sin_port));
++    native.sin_port = 0;
++    ret = bind(native_handle_, reinterpret_cast<sockaddr*>(&native), sizeof(native));
++  }
++#endif
++#else
+   int ret = bind(native_handle_, (sockaddr*)name, name_len);
++#endif
+   if (ret < 0) {
++    REXSYS_WARN("bind to port {} failed: errno {}", uint16_t(name->sin_port), errno);
+     return X_STATUS_UNSUCCESSFUL;
+   }
+ 

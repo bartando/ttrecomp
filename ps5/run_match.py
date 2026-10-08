@@ -108,6 +108,8 @@ def main():
     parser.add_argument("--cvar", action="append", default=[],
                         help="extra name=value for ps5.toml (repeatable)")
     parser.add_argument("--log", type=Path, required=True)
+    parser.add_argument("--rumble", action="store_true",
+                        help="keep controller rumble on (off by default: nobody holds the pad)")
     parser.add_argument("--no-rally", action="store_true",
                         help="stand at the table instead of tapping A in the match")
     args = parser.parse_args()
@@ -117,6 +119,8 @@ def main():
         # Serve and swing so measurements cover real rallies, not a player
         # standing at the table.
         config.append("tabletennis_test_rally = true")
+    if not args.rumble:
+        config.append("ps5_pad_rumble = false")
     for item in args.cvar:
         name, _, value = item.partition("=")
         if not value:

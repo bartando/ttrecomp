@@ -29,3 +29,6 @@ CMakeUserPresets.json
 # Python and shader scratch output
 __pycache__/
 /vert.spv
+
+# macOS Finder metadata
+.DS_Store

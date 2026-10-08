@@ -24,6 +24,10 @@ constexpr Default kDefaults[] = {
     // Playable without a controller.
     {"mnk_mode", "true"},
     {"fullscreen", "false"},
+    // Keep normal play sessions useful for investigating stutters.
+    {"frame_hitch_diagnostics", "true"},
+    {"tabletennis_guest_fps_log_interval", "300"},
+    {"log_flush_interval", "1"},
     // The SDK supersamples at 2x2, which costs gameplay its 60 fps here.
     {"resolution_scale", "1"},
     {"draw_resolution_scale_x", "1"},

@@ -62,6 +62,11 @@ class TabletennisApp : public rex::ReXApp {
   void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
     (void)drawer;
     rex::ui::RegisterBind(
+        "bind_tabletennis_hitch_marker", "F8", "Mark a gameplay stutter", [] {
+          REXLOG_INFO("PERF user marker: player noticed a stutter");
+          rex::FlushLogging();
+        });
+    rex::ui::RegisterBind(
         "bind_tabletennis_frame_trace", "F7", "Capture one GPU frame", [this] {
           if (!runtime() || !runtime()->graphics_system()) {
             REXLOG_WARN("GPU frame trace requested before the runtime was ready");
@@ -85,6 +90,7 @@ class TabletennisApp : public rex::ReXApp {
     tabletennis::native::Shutdown();
     rex::ui::UnregisterBind("bind_tabletennis_native_renderer");
     rex::ui::UnregisterBind("bind_tabletennis_frame_trace");
+    rex::ui::UnregisterBind("bind_tabletennis_hitch_marker");
   }
 
   // Override virtual hooks for customization:

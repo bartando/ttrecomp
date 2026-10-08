@@ -95,4 +95,7 @@ draw_resolution_scale_y = 1
 shared_memory_filter_gpu_page_only_watches = true
 
 # --- Diagnostics ------------------------------------------------------------
+frame_hitch_diagnostics = true
+tabletennis_guest_fps_log_interval = 300
+log_flush_interval = 1
 show_fps_counter = true

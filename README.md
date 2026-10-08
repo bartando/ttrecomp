@@ -43,6 +43,23 @@ the app.
 Settings go in `tabletennis.toml` next to the app (see the one in this repo
 for the common ones). Without it, the built-in defaults apply.
 
+On macOS (Vulkan), normal play sessions automatically record stutter diagnostics in
+`logs/tabletennis_NNN.log` next to the app. `PERF hitch` entries report guest
+swap intervals over 25 ms, pipeline compilation, GPU fence waits, guest file
+reads (including lock waits and memory invalidation), and stale protection
+recoveries. `PERF summary` reports average, p95, p99 and worst frame times
+every 300 intervals, including hitches whose individual entries were suppressed
+to keep logging bounded. macOS also reports game CPU usage, system load averages
+and peak resident memory. System load is context, not proof of a background
+process causing a stall. Worker timings can overlap and are attributed when
+the operation finishes; they do not prove causation either.
+
+Press **F8** (or **Fn+F8** if macOS uses media keys) just after a noticeable
+stutter to add a timestamped `PERF user marker`. Logs flush every second and
+retain the five most recent launches. To turn this telemetry off, set
+`frame_hitch_diagnostics = false` and `tabletennis_guest_fps_log_interval = 0`
+in `tabletennis.toml`.
+
 ## Packaging a release
 
 Build the release preset, then:

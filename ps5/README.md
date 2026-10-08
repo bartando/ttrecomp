@@ -64,8 +64,24 @@ python3 ps5/upload_title.py out/ps5-port/dist/PPSA99782 --host PS5_IP \
 Close an existing game instance and wait for its sandbox to be released
 before replacing the title. The uploader checks all code/data bytes after
 FTP's SELF unwrapping, allowing only the service's known clearing of
-`PT_SCE_VERSION`. Metadata is installed last. `upload_game.py` independently
-uploads/resumes the extracted game files and checks the XEX on readback.
+`PT_SCE_VERSION`. Metadata is installed last. For development,
+`upload_game.py` uploads/resumes an extracted game folder and checks the XEX on
+readback.
+
+## Installing for players
+
+`install_ps5.py` is the player-facing installer: it takes the user's Xbox 360
+disc image (or extracted folder), streams the game files straight from it to
+the console with resume, installs the title and, with ffmpeg, makes the
+home-screen background (`pic0.png` 3840x2160, `pic1.png` 1920x1080) from the
+game's menu movie. It finds the PS5 by scanning the local /24 for ftpsrv.
+`package_release.py` lays out the release folder and zip with the title, the
+installer and `release.json`, the expected readback hashes of the executables.
+
+```sh
+python3 ps5/package_release.py
+python3 out/ps5-release/TableTennisRecompiled-PS5/install_ps5.py "Table Tennis.iso"
+```
 
 ## Current verification
 

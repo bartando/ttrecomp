@@ -16,7 +16,7 @@ Take-Two Interactive.
 
 ## How do I play?
 
-The release zips contain only the recompiled program. On first launch it asks
+The release downloads contain only the recompiled program. On first launch it asks
 for your own Xbox 360 ISO of the game and extracts the files it needs next to
 the app.
 
@@ -29,10 +29,12 @@ the app.
 
 ### macOS (Apple Silicon)
 
-1. Extract `TableTennisRecomp-macOS.zip` into a folder you control (not
-   Downloads or Applications). Game files, saves, settings and logs live in
-   the folder containing the app.
-2. Move the app into that folder with Finder. If macOS still runs it from its
+1. Open `TableTennisRecomp-macOS.dmg` and drag the app into a folder you control,
+   such as `~/Games/Table Tennis Recomp`, then eject the disk image. If using
+   the ZIP instead, extract it and move the app into that folder. Game files,
+   settings and logs live beside the app; saves and shader caches use your
+   user-data directory. Avoid Downloads and Applications.
+2. Launch the copied app. If macOS still runs it from its
    quarantine location, the installer says so.
 3. The first time, right-click the app and choose Open, or allow it under
    System Settings > Privacy & Security. The app is ad-hoc signed, not
@@ -70,7 +72,8 @@ in `tabletennis.toml`.
 Build the release preset, then:
 
 - macOS: `tools/package_macos.sh out/build/macos-arm64-release` writes
-  `out/package/TableTennisRecomp-macOS.zip`. The minimum macOS version follows
+  `out/package/TableTennisRecomp.app`, `TableTennisRecomp-macOS.zip`, and
+  `TableTennisRecomp-macOS.dmg`. The minimum macOS version follows
   the Vulkan loader you build against. Homebrew's needs macOS 15, and the
   LunarG SDK's (`VULKAN_SDK`) goes lower.
 - Windows: `tools/package_windows.ps1 -Build out/build/win-amd64-release`
@@ -78,6 +81,12 @@ Build the release preset, then:
 
 Both scripts refuse to package a binary that still contains the builder's home
 directory path.
+
+To wrap an existing signed app without rebuilding it, run
+`tools/package_macos_dmg.sh /path/to/TableTennisRecomp.app /path/to/output`.
+The DMG contains the app and copy-before-launch instructions; it does not
+include an Applications shortcut because game files currently live beside
+the app.
 
 ## Approach
 

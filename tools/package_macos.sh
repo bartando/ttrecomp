@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Packages a built tabletennis into TableTennisRecomp.app and a release zip.
+# Packages a built tabletennis into TableTennisRecomp.app, a ZIP and a DMG.
 # The bundle carries no game files: the app asks for the user's own ISO on
 # first launch and extracts it next to the .app.
 #
@@ -122,3 +122,4 @@ ZIP="$OUT/$NAME-macOS.zip"
 rm -f "$ZIP"
 ditto -c -k --keepParent --norsrc "$APP" "$ZIP"
 echo "$ZIP (macOS $MIN_MACOS+)"
+"$ROOT/tools/package_macos_dmg.sh" "$APP" "$OUT"

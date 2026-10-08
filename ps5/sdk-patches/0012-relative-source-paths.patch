@@ -1,0 +1,17 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index be7a4fd..29fb6a9 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -151,6 +151,12 @@ elseif(PS5)
+     set(REX_PLATFORM "ps5-amd64")
+     add_compile_definitions(REX_PLATFORM_PS5=1)
+     add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-frtti>" "$<$<COMPILE_LANGUAGE:CXX>:-fexceptions>")
++    # __FILE__ in asserts and log source locations would otherwise carry the
++    # builder's absolute (home) paths into the released title.
++    add_compile_options("-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}/=rexglue-sdk/")
++    if(REXGLUE_PS5_GAME_SOURCE)
++        add_compile_options("-ffile-prefix-map=${REXGLUE_PS5_GAME_SOURCE}/=game/")
++    endif()
+ elseif(UNIX AND NOT APPLE)
+     if(REX_TARGET_PROCESSOR MATCHES "AMD64|x86_64")
+         set(REX_PLATFORM "linux-amd64")

@@ -142,6 +142,12 @@ fence is now a `vkCmdFillBuffer` into the imported guest memory on the GPU
 timeline, between barriers. Without zero copy it falls back to the old CPU
 store.
 
+`0012-relative-source-paths.patch` keeps the builder's home directory out of
+the title. `__FILE__` in asserts and log source locations had baked ~200
+absolute paths into `eboot.bin`. PS5 builds now map the SDK and game source
+roots to `rexglue-sdk/` and `game/`. `ps5/package_release.py` refuses to
+package any file that still contains the local home path or user name.
+
 The resulting runtime and full Table Tennis recompilation built successfully
 for PS5. The host writes startup/crash logs in `/app0/tt-game.log` and
 `/app0/tt-game-crash.log`; hardware startup debugging is still in progress.

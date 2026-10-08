@@ -14,6 +14,13 @@ must supply files from your own legally obtained copy of the game.
 Fan-made and unofficial. Not affiliated with or endorsed by Rockstar Games or
 Take-Two Interactive.
 
+## License
+
+Project-authored code is licensed under **GPL-3.0-or-later**; see `LICENSE`.
+Third-party code retains its existing licenses and copyright notices,
+including the ReXGlue SDK's BSD-3-Clause license. This license does not cover
+the retail game's code or assets, which users supply separately.
+
 ## How do I play?
 
 The release downloads contain only the recompiled program. On first launch it asks

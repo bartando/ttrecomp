@@ -148,6 +148,17 @@ absolute paths into `eboot.bin`. PS5 builds now map the SDK and game source
 roots to `rexglue-sdk/` and `game/`. `ps5/package_release.py` refuses to
 package any file that still contains the local home path or user name.
 
+`0013-final-output-capture.patch` serves the title's settings menu and its
+unattended checks.
+
+- **`Presenter::CaptureFinalOutput`** copies the next presented frame,
+  overlays included, into memory. It only works when
+  `present_final_output_capture` (debugging, off by default) gave the
+  swapchain transfer-source usage, so normal play is unaffected.
+- **`REX_HAS_FIDELITYFX_SDK` is now PUBLIC on `rexui`.** It adds fields to
+  `Presenter`'s paint config, and code outside `rexui` (graphics, the title
+  host) used to compile `Presenter` with a different layout.
+
 The resulting runtime and full Table Tennis recompilation built successfully
 for PS5. The host writes startup/crash logs in `/app0/tt-game.log` and
 `/app0/tt-game-crash.log`; hardware startup debugging is still in progress.

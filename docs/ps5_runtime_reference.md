@@ -44,7 +44,7 @@ or a CPU-only ELF will not supply the game renderer.
   `VK_KHR_display` surfaces and swapchains instead of desktop window surfaces.
 - DualSense input through `scePad*` and stereo output through `sceAudioOut*`.
 
-These are implemented in the SDK patch and PS5 host, rather than by replacing
+These are implemented in the SDK's `ps5` branch and the PS5 host, rather than by replacing
 the Xbox 360 guest code. Its published results report 102 passed / 0 failed
 RADV smoke checks on a PS5 Pro, firmware 13.42. Its README reports playable
 MCLA on Pro 13.42 and Slim 12.70. These are upstream evidence, not tests on
@@ -120,7 +120,7 @@ After correcting that shared read/write offset, the **actual ReXGlue handler
 passed write-watch retry, RAX/RIP writeback and XMM0/XMM15 read/writeback**
 with zero failures. This is verified in both payload and installed-title
 processes on the user's console session, not for other firmware. The tested adaptation
-is preserved in `ps5/sdk-patches/0001-platform-and-faults.patch`.
+is the first commit of the SDK fork's `ps5` branch.
 
 The PS5 platform library documents a dedicated GPU address window. CPU guest
 memory placement must be tested alongside that window, rather than assuming

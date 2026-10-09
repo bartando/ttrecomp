@@ -22,9 +22,9 @@ title waiting for system close; close it through the PS menu.
 The ignored `out/ps5-port` workspace contains the prepared public toolchain,
 RADV archive, an isolated SDK clone, staged guest/game sources and build
 outputs. Public dependency revisions and the Linux builder are documented in
-`docs/ps5_runtime_reference.md`. SDK adaptations are preserved in
-`sdk-patches/`; do not apply them to the desktop SDK while this port is
-experimental.
+`docs/ps5_runtime_reference.md`. The isolated SDK clone is the `ps5` branch
+of the SDK fork; `sdk-patches/README.md` explains how to set it up and keep it
+current.
 
 `game-source` contains copies of `src`, `generated` and `ps5/game`. Its
 `third_party/rexglue-sdk` symlink points to the isolated SDK. Only the staged
@@ -106,13 +106,13 @@ host stopped at its first check because `/data` does not exist inside the
 title sandbox. With the game files under the title directory, the next run
 reached guest execution, Vulkan draws and audio output, then died after about
 three seconds with SIGFPE in the guest audio callback (see
-`sdk-patches/0004-host-thread-fpscr.patch`). With that fixed, the intro played
+the SDK's host-thread FPSCR fix). With that fixed, the intro played
 at 60 fps with audio, then the title called a null guest function about 20
 seconds in. The voice-chat singleton's init (VDP socket on port 1001, voice
 engine) failed on PS5; the game's own teardown leaves the "voice enabled" bit
 set, and the next update dereferences the freed engine.
 `src/native/tabletennis_voice_session_guard.cpp` clears that bit after
-teardown, and `sdk-patches/0005-socket-bind.patch` lets the bind succeed.
+teardown, and the SDK's PS5 socket changes let the bind succeed.
 That build also links the game library with `--whole-archive`: before, every
 `extern "C" REX_FUNC(sub_...)` override in `src/native` was silently dropped
 from the PS5 link, while desktop has always had them. Next run pending.

@@ -64,7 +64,8 @@ Two changes cut the `mprotect` calls:
 
 1. Widen CPU write-fault invalidation, so one fault unprotects a whole window.
 2. Make GPU uploads cover the whole invalid run inside that window, so one
-   call re-protects it (`WidenUploadRanges`, SDK patch 0007).
+   call re-protects it (`WidenUploadRanges`, SDK commit "ps5: batch
+   write-watch uploads and profile the GPU thread").
 
 The window size trades `mprotect` calls against extra copying. Each row below
 is one unattended 35–40 s match:
@@ -144,7 +145,8 @@ The PS5 host turns it off, falling back to the standard half-guest-pixel
 offset with edge fill. Edge discontinuity in screenshots dropped from 128-190
 to 0.4-1.9.
 
-Update: 2x now holds 60.00 fps in rallies (SDK patch 0010).
+Update: 2x now holds 60.00 fps in rallies (SDK commit "ps5: 2x resolution
+at a locked 60").
 
 - **The GPU was never the limit.** `vulkan_gpu_frame_timer` measures 2.75 ms
   of GPU work per frame at 1x and 8.1 ms at 2x.
@@ -158,8 +160,8 @@ Update: 2x now holds 60.00 fps in rallies (SDK patch 0010).
   to stderr, which a retail title loses.
 
 2x is the PS5 default since 2026-10-08 (`ps5/game/main.cpp`). The stretched
-geometry first seen there was fixed by SDK patch 0011 (fences written on the
-GPU timeline).
+geometry first seen there was fixed by SDK commit "ps5: write
+EVENT_WRITE_SHD fences on the GPU timeline".
 
 Earlier note: getting 2x to a locked 60 needs GPU-side numbers. Timestamp queries
 return valid values (10 ns ticks), but the fork's per-frame GPU profiler

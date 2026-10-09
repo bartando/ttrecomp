@@ -138,7 +138,7 @@ if(WIN32)
         "${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0")
     configure_file(src/tabletennis.rc.in "${CMAKE_CURRENT_BINARY_DIR}/tabletennis.rc" @ONLY)
     add_executable(tabletennis WIN32 ${TABLETENNIS_SOURCES}
-        "${CMAKE_CURRENT_BINARY_DIR}/tabletennis.rc")
+        "${CMAKE_CURRENT_BINARY_DIR}/tabletennis.rc" src/tabletennis.manifest)
 else()
     add_executable(tabletennis ${TABLETENNIS_SOURCES})
 endif()

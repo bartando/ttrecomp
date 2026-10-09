@@ -33,15 +33,31 @@ constexpr Default kDefaults[] = {
     {"async_shader_compilation", "true"},
     // Playable without a controller.
     {"mnk_mode", "true"},
+#if defined(_WIN32)
+    // Borderless; F11 or Alt+Enter switches to a window, Alt+F4 quits.
+    {"fullscreen", "true"},
+#else
     {"fullscreen", "false"},
+#endif
     // Keep normal play sessions useful for investigating stutters.
     {"frame_hitch_diagnostics", "true"},
     {"tabletennis_guest_fps_log_interval", "300"},
     {"log_flush_interval", "1"},
+#if defined(_WIN32)
+    // 2560x1440 with FSR 1 to the display: a locked 60 in matches on an
+    // RTX 3080. At 2x the host-pixel half-pixel offset leaves uncovered strips
+    // along resolve edges; the guest-pixel offset with edge fill is clean.
+    {"resolution_scale", "2"},
+    {"draw_resolution_scale_x", "2"},
+    {"draw_resolution_scale_y", "2"},
+    {"draw_resolution_scaled_half_pixel_offset", "false"},
+    {"present_effect", "fsr"},
+#else
     // The SDK supersamples at 2x2, which costs gameplay its 60 fps here.
     {"resolution_scale", "1"},
     {"draw_resolution_scale_x", "1"},
     {"draw_resolution_scale_y", "1"},
+#endif
     // Online play is System Link (the game's own LAN mode, see
     // native/tabletennis_system_link.cpp); the menu only offers it to a
     // signed-in Live profile.

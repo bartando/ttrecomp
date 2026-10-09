@@ -34,6 +34,7 @@ set(TABLETENNIS_SOURCES
     src/native/tabletennis_crowd_snapshot.cpp
     src/native/tabletennis_crowd_texture_decoder.cpp
     src/native/tabletennis_guest_memory.cpp
+    src/native/tabletennis_debug_print.cpp
     src/native/tabletennis_draw_constants.cpp
     src/native/tabletennis_draw_replacer_dispatcher.cpp
     src/native/tabletennis_6ae_player_observer.cpp
@@ -104,12 +105,19 @@ set(TABLETENNIS_SOURCES
     src/native/tabletennis_native_renderer.cpp
     src/native/tabletennis_scene_draw_catalog.cpp
     src/native/tabletennis_scene_owner_observer.cpp
+    src/native/tabletennis_system_link.cpp
     src/native/tabletennis_vertex_declaration.cpp
     src/native/tabletennis_voice_session_guard.cpp
     src/test/tabletennis_frontend_launch_test.cpp
     src/tabletennis_defaults.cpp
     src/tabletennis_iso_installer.cpp
 )
+
+# Debugging only: function-entry tracer from tools/gen_function_trace.py.
+set(TABLETENNIS_FUNCTION_TRACE_SOURCE "" CACHE FILEPATH "Generated guest function tracer")
+if(TABLETENNIS_FUNCTION_TRACE_SOURCE)
+    list(APPEND TABLETENNIS_SOURCES "${TABLETENNIS_FUNCTION_TRACE_SOURCE}")
+endif()
 
 if(APPLE)
     list(APPEND TABLETENNIS_SOURCES src/tabletennis_macos.mm)

@@ -7,6 +7,9 @@
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <sstream>
+#include <string>
+#include <thread>
 
 #include <rex/cvar.h>
 #include <rex/input/input.h>
@@ -29,8 +32,34 @@ REXCVAR_DEFINE_BOOL(
     "proves gameplay is live.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_STRING(
+    tabletennis_test_input_script, "", "Table Tennis",
+    "Test-only: controller presses on a timeline, `seconds:buttons` pairs "
+    "(XInput bits, hex) separated by commas, e.g. 70:1000,82:2 for A then "
+    "d-pad down. Works on every platform, for unattended menu navigation.");
+
 namespace tabletennis::test {
 namespace {
+
+// Presses each scripted button set for a few input polls at its time after
+// the hooks are installed.
+void StartInputScript(std::string script) {
+  std::thread([script] {
+    const auto start = std::chrono::steady_clock::now();
+    std::stringstream entries(script);
+    std::string entry;
+    while (std::getline(entries, entry, ',')) {
+      const auto colon = entry.find(':');
+      if (colon == std::string::npos) continue;
+      const double seconds = std::stod(entry.substr(0, colon));
+      const auto buttons = uint16_t(std::stoul(entry.substr(colon + 1), nullptr, 16));
+      std::this_thread::sleep_until(start +
+                                    std::chrono::milliseconds(int64_t(seconds * 1000)));
+      REXLOG_INFO("Test input script: {:.1f} s buttons {:04X}", seconds, buttons);
+      rex::kernel::xam::QueueSyntheticInput(buttons, 8);
+    }
+  }).detach();
+}
 
 constexpr uint32_t kPongShellSingleton = 0x825EAB30;
 constexpr uint32_t kGameConfigSingleton = 0x825EAB28;
@@ -393,6 +422,9 @@ void InstallFrontendLaunchTest() {
     g_bootstrap_active.store(true, std::memory_order_release);
     REXLOG_INFO(
         "Table Tennis test path: Start bootstrap enabled until Frontend");
+  }
+  if (!REXCVAR_GET(tabletennis_test_input_script).empty()) {
+    StartInputScript(REXCVAR_GET(tabletennis_test_input_script));
   }
   REXLOG_INFO("Table Tennis guarded auto-Exhibition test installed "
               "(enable tabletennis_test_path to use it)");

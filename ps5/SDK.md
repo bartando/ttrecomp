@@ -7,20 +7,17 @@ off on desktop. The commits whose subjects start with `ps5:` explain each
 change.
 
 Build the PS5 title from a separate checkout at the commit pinned by
-`third_party/rexglue-sdk`. That keeps the FFmpeg patch and the PS5 build tree
-out of the desktop submodule:
+`third_party/rexglue-sdk`. The builder container only mounts `out/ps5-port`:
 
 ```sh
 git clone https://github.com/bartando/rexglue-skate3.git out/ps5-port/rexglue-sdk
 git -C out/ps5-port/rexglue-sdk checkout "$(git rev-parse HEAD:third_party/rexglue-sdk)"
 git -C out/ps5-port/rexglue-sdk submodule update --init --recursive
-git -C out/ps5-port/rexglue-sdk/thirdparty/FFmpeg apply \
-  "$PWD/ps5/sdk-patches/ffmpeg-config.patch"
 ```
 
-`ffmpeg-config.patch` selects the PS5 configuration inside the FFmpeg
-dependency without changing desktop configurations. It is the only change
-kept as a patch, because FFmpeg is a third-party submodule.
+No patches are applied. FFmpeg's `config.h` has no PS5 branch, so the SDK
+keeps the PS5 configuration in `thirdparty/ffmpeg-overlay/ps5/config.h` and
+puts it ahead of FFmpeg's own on the PS5 include path.
 
 ## Changes active on desktop
 

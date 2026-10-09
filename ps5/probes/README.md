@@ -91,7 +91,7 @@ not part of the macOS build.
 
 `rex_faults.cpp` tests the PS5 handler adapted into an isolated clone of this
 project's v0.8 SDK. The handler is in the SDK's `src/core/exception_handler_ps5.cpp`, compiled
-only for PS5 (see `ps5/sdk-patches/README.md`).
+only for PS5 (see `ps5/SDK.md`).
 
 ```sh
 LLVM_CONFIG=/opt/homebrew/opt/llvm@21/bin/llvm-config \

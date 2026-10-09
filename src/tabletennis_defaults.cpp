@@ -19,6 +19,9 @@ struct Default {
 };
 
 constexpr Default kDefaults[] = {
+    // The native renderers only run on Vulkan; "auto" would pick D3D12 first
+    // on Windows. Startup still falls back to D3D12 if Vulkan fails to start.
+    {"gpu_backend", "vulkan"},
     // The game advances a fixed step per guest frame, so its speed follows the
     // guest vblank. Host-clock pacing keeps that vblank at a real 60 Hz;
     // without it the intro and menus run too fast.

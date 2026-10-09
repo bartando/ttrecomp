@@ -4,9 +4,11 @@ An in-progress native recompilation of the Xbox 360 version of
 *Rockstar Games Presents Table Tennis*, built on the
 [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk).
 
-**Status: it runs into a match.** Menus, character selection, loading, and the
-arena render through Vulkan (MoltenVK) on Apple Silicon, with keyboard and
-controller input available. Full-match compatibility is still untested.
+**Status: it runs into a match** on Apple Silicon (Vulkan through MoltenVK)
+and a jailbroken PS5, with keyboard and controller input available. System
+Link (the game's LAN mode) is tested between macOS and PS5. The Windows build
+is new and not yet tested on hardware. Full-match compatibility is still
+untested.
 
 This project contains no retail game code or assets. To build or run it you
 must supply files from your own legally obtained copy of the game.
@@ -29,10 +31,30 @@ the app.
 
 ### Windows
 
+Needs 64-bit Windows 10 or later, a Vulkan-capable GPU and an AVX2 CPU
+(Intel Haswell / AMD Zen or newer). No Visual C++ redistributable is needed.
+
 1. Extract `TableTennisRecomp-Windows.zip` into a folder you control.
 2. Run `tabletennis.exe`.
 3. Click "Select ISO", pick your ISO, and wait for the install to finish.
 4. Click "Start Game".
+
+The game files, settings, logs and saves live next to `tabletennis.exe`. It
+renders with Vulkan; if Vulkan fails to start it falls back to Direct3D 12,
+which lacks the game-specific rendering. `gpu_backend = "d3d12"` in
+`tabletennis.toml` forces that path.
+
+### PS5 (jailbroken)
+
+Extract `TableTennisRecompiled-PS5.zip` and follow its `README.txt`: with
+ftpsrv and ShadowMountPlus running on the console, one command installs the
+title and your game files over the network:
+
+```sh
+python3 install_ps5.py "path/to/Table Tennis.iso"
+```
+
+See `ps5/README.md` for details.
 
 ### macOS (Apple Silicon)
 
@@ -90,9 +112,13 @@ Build the release preset, then:
   the Vulkan loader you build against. Homebrew's needs macOS 15, and the
   LunarG SDK's (`VULKAN_SDK`) goes lower.
 - Windows: `tools/package_windows.ps1 -Build out/build/win-amd64-release`
-  writes `out/package/TableTennisRecomp-Windows.zip`.
+  writes `out/package/TableTennisRecomp-Windows.zip`. From macOS or Linux,
+  `tools/windows-cross/build.sh` cross-compiles and packages the same zip in
+  Docker (clang targeting MSVC, with the Windows SDK fetched by xwin).
+- PS5: `python3 ps5/package_release.py` writes
+  `out/ps5-release/TableTennisRecompiled-PS5.zip` from a built title.
 
-Both scripts refuse to package a binary that still contains the builder's home
+The scripts refuse to package a binary that still contains the builder's home
 directory path.
 
 To wrap an existing signed app without rebuilding it, run

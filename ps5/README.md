@@ -22,9 +22,9 @@ title waiting for system close; close it through the PS menu.
 The ignored `out/ps5-port` workspace contains the prepared public toolchain,
 RADV archive, an isolated SDK clone, staged guest/game sources and build
 outputs. Public dependency revisions and the Linux builder are documented in
-`docs/ps5_runtime_reference.md`. The isolated SDK clone is the `ps5` branch
-of the SDK fork; `sdk-patches/README.md` explains how to set it up and keep it
-current.
+`docs/ps5_runtime_reference.md`. The isolated SDK clone is a checkout of the
+SDK commit pinned by `third_party/rexglue-sdk`; `sdk-patches/README.md`
+explains how to set it up.
 
 `game-source` contains copies of `src`, `generated` and `ps5/game`. Its
 `third_party/rexglue-sdk` symlink points to the isolated SDK. Only the staged

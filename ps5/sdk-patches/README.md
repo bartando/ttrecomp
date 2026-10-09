@@ -159,6 +159,25 @@ unattended checks.
   `Presenter`'s paint config, and code outside `rexui` (graphics, the title
   host) used to compile `Presenter` with a different layout.
 
+`0014-system-link-networking.patch` makes the game's System Link (LAN)
+multiplayer run, cross-platform with the desktop build. The desktop
+equivalent is `netplay/desktop-sdk-netplay.patch`.
+
+- **Sockets.** BSD `sockaddr`, byte order and errno→WSA mapping are fixed,
+  and `getsockname` is implemented. The PS5 sandbox refuses `FIONBIO`, so
+  non-blocking mode becomes `MSG_DONTWAIT`. Guest ports below 1024, which
+  the PS5 can't bind, move to `10000 + instance*1024 + port`. Socket handles
+  are small positive numbers because RAGE treats negative ones as invalid.
+- **XNet.** The local XNADDR carries the real LAN address. Each (peer,
+  instance, session key) gets its own virtual address `1.0.0.N`, and
+  datagrams are tagged with the key so a second session doesn't hijack the
+  first. QoS is faked, and `XSessionCreate` fills `XSESSION_INFO`.
+- **`net_instance`** (0–7) lets several copies play on one machine.
+- **Live sign-in** sets `XUSER_INFO_FLAG_LIVE_ENABLED` and grants
+  privileges, because the game only offers online play to Live accounts.
+- **Jump stubs.** `ResolveIndirectFunction` follows `lis/addi/mtctr/bctr`
+  and `b` stubs that the recompiler folded into their neighbours.
+
 The resulting runtime and full Table Tennis recompilation built successfully
 for PS5. The host writes startup/crash logs in `/app0/tt-game.log` and
 `/app0/tt-game-crash.log`; hardware startup debugging is still in progress.

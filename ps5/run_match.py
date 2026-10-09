@@ -108,14 +108,17 @@ def main():
     parser.add_argument("--cvar", action="append", default=[],
                         help="extra name=value for ps5.toml (repeatable)")
     parser.add_argument("--log", type=Path, required=True)
+    parser.add_argument("--no-test-path", action="store_true",
+                        help="stay in the menus (for scripted pad input) instead of "
+                             "launching a match; the run then lasts --seconds from launch")
     parser.add_argument("--rumble", action="store_true",
                         help="keep controller rumble on (off by default: nobody holds the pad)")
     parser.add_argument("--no-rally", action="store_true",
                         help="stand at the table instead of tapping A in the match")
     args = parser.parse_args()
 
-    config = ["tabletennis_test_path = true"]
-    if not args.no_rally:
+    config = [] if args.no_test_path else ["tabletennis_test_path = true"]
+    if not args.no_rally and not args.no_test_path:
         # Serve and swing so measurements cover real rallies, not a player
         # standing at the table.
         config.append("tabletennis_test_rally = true")
@@ -154,8 +157,10 @@ def main():
                 return False
         if not wait_until(console.running, 30):
             sys.exit("title did not start")
-        reached = wait_until(in_match, args.reach_timeout, interval=5.0)
-        if reached:
+        if args.no_test_path:
+            time.sleep(args.seconds)
+            reached = True
+        elif reached := wait_until(in_match, args.reach_timeout, interval=5.0):
             print(f"in match after {time.monotonic() - started:.0f}s; "
                   f"running {args.seconds}s", flush=True)
             time.sleep(args.seconds)

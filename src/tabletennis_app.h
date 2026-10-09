@@ -38,7 +38,21 @@ class TabletennisApp : public rex::ReXApp {
 #if defined(__APPLE__)
     tabletennis::SetDockIconMacOS();
 #endif
-    return tabletennis::FinalizeGamePaths(defaults, imgui_drawer(), std::move(resume));
+    // The profile is created after paths are final, so give it this
+    // install's XUID first, whether the paths are ready now or after setup.
+    auto with_identity = [](rex::PathConfig paths) {
+      tabletennis::EnsureInstallXuid(paths.user_data_root);
+      return paths;
+    };
+    auto paths = tabletennis::FinalizeGamePaths(
+        defaults, imgui_drawer(),
+        [resume = std::move(resume), with_identity](rex::PathConfig ready) {
+          resume(with_identity(std::move(ready)));
+        });
+    if (paths) {
+      return with_identity(std::move(*paths));
+    }
+    return paths;
   }
 
   void OnPostSetup() override {

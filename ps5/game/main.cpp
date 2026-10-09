@@ -237,6 +237,7 @@ int run_game() {
   imgui_drawer->SetPresenterAndImmediateDrawer(graphics->presenter(), immediate_drawer);
   auto* menu = new tabletennis::ps5::SettingsMenu(*context, *imgui_drawer, *graphics->presenter(),
                                                   menu_fonts, root / "settings.toml");
+  tabletennis::EnsureInstallXuid(root / "user");
   auto* runtime = new rex::Runtime(root / "game", root / "user", {}, root / "cache");
   runtime->set_app_context(context);
   runtime->set_display_window(window);

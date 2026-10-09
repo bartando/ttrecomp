@@ -1,5 +1,12 @@
 #include "tabletennis_defaults.h"
 
+#include <cinttypes>
+#include <cstdio>
+#include <fstream>
+#include <random>
+#include <string>
+#include <system_error>
+
 #include <rex/cvar.h>
 #include <rex/logging.h>
 
@@ -32,7 +39,23 @@ constexpr Default kDefaults[] = {
     {"resolution_scale", "1"},
     {"draw_resolution_scale_x", "1"},
     {"draw_resolution_scale_y", "1"},
+    // Online play is System Link (the game's own LAN mode, see
+    // native/tabletennis_system_link.cpp); the menu only offers it to a
+    // signed-in Live profile.
+    {"tabletennis_system_link", "true"},
+    {"user_live_signed_in", "true"},
 };
+
+// The SDK's default profile XUID, which every install shared before.
+constexpr const char* kSharedXuid = "B13E07DFF9AB6772";
+constexpr const char* kXuidFileName = "profile_xuid.txt";
+
+std::string NewXuid() {
+  std::random_device random;
+  char text[17];
+  std::snprintf(text, sizeof(text), "B13E07DF%08" PRIX32, uint32_t(random()));
+  return text;
+}
 
 }  // namespace
 
@@ -42,6 +65,35 @@ void ApplyAppDefaults() {
       REXLOG_WARN("Could not apply app default {}={}", entry.name, entry.value);
     }
   }
+}
+
+void EnsureInstallXuid(const std::filesystem::path& user_data_root) {
+  if (rex::cvar::GetFlagByName("user_profile_xuid") != kSharedXuid) {
+    return;  // Chosen by the user.
+  }
+  const auto xuid_file = user_data_root / kXuidFileName;
+  std::string xuid;
+  if (std::ifstream in(xuid_file); in) {
+    std::getline(in, xuid);
+  }
+  if (xuid.size() != 16) {
+    xuid = NewXuid();
+    std::error_code error;
+    std::filesystem::create_directories(user_data_root, error);
+    std::ofstream(xuid_file) << xuid << "\n";
+    // Copy, not move: the old profile stays usable if the XUID is reset.
+    const auto shared_saves = user_data_root / kSharedXuid;
+    const auto own_saves = user_data_root / xuid;
+    if (std::filesystem::is_directory(shared_saves) && !std::filesystem::exists(own_saves)) {
+      std::filesystem::copy(shared_saves, own_saves, std::filesystem::copy_options::recursive,
+                            error);
+      if (error) {
+        REXLOG_WARN("Could not copy saves to the new profile {}: {}", xuid, error.message());
+      }
+    }
+    REXLOG_INFO("Profile XUID for this install: {}", xuid);
+  }
+  rex::cvar::SetFlagByName("user_profile_xuid", xuid);
 }
 
 }  // namespace tabletennis

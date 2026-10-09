@@ -534,6 +534,33 @@ def compositor():
     tree.links.new(alpha.outputs["Image"], output.inputs["Image"])
 
 
+def save_portable(path):
+    """Save the scene, and set up later renders, without the author's absolute paths.
+
+    Blender stamps the .blend path into PNG metadata, keeps an absolute source path
+    on packed images even after make_paths_relative, and remembers the last file
+    browser directory in a fixed buffer that a shorter path only partly overwrites.
+    """
+    scene = bpy.context.scene
+    for name in dir(scene.render):
+        if name.startswith("use_stamp"):
+            setattr(scene.render, name, False)
+    bpy.context.preferences.filepaths.save_version = 0
+    bpy.ops.wm.save_as_mainfile(filepath=str(path))
+    bpy.ops.file.make_paths_relative()
+    for image in bpy.data.images:
+        if image.packed_file and image.filepath:
+            data = image.packed_file.data
+            image.unpack(method="REMOVE")
+            image.pack(data=data, data_len=len(data))
+    for screen in bpy.data.screens:
+        for area in screen.areas:
+            if area.type == "FILE_BROWSER":
+                area.spaces.active.params.directory = b"/" * 1000
+                area.spaces.active.params.directory = b"//"
+    bpy.ops.wm.save_mainfile()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--preview", action="store_true")
@@ -551,7 +578,7 @@ def main():
         for area in screen.areas:
             if area.type == "VIEW_3D":
                 area.spaces.active.region_3d.view_perspective = "CAMERA"
-    bpy.ops.wm.save_as_mainfile(filepath=str(ASSETS / "tabletennis_icon.blend"))
+    save_portable(ASSETS / "tabletennis_icon.blend")
     if args.final:
         bpy.ops.render.render(write_still=True)
     else:

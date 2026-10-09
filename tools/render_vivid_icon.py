@@ -11,7 +11,7 @@ import bpy
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
-from render_icon import compositor
+from render_icon import compositor, save_portable
 
 OUT = ROOT / "assets/icon/variants/vivid"
 ASSETS = ROOT / "assets/icon"
@@ -64,7 +64,7 @@ def main():
     tree.links.new(source.outputs[aov.name], saturation.inputs["Factor"])
     tree.links.new(saturation.outputs["Image"], transform.inputs["Image"])
     OUT.mkdir(parents=True, exist_ok=True)
-    bpy.ops.wm.save_as_mainfile(filepath=str(OUT / "vivid_preview.blend"))
+    save_portable(OUT / "vivid_preview.blend")
     scene.render.filepath = str(ASSETS / "tabletennis_icon_vivid_master.png")
     bpy.ops.render.render(write_still=True)
     # Skip the inset and rounded mask; keep the selective saturation.

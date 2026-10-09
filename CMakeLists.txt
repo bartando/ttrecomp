@@ -3,7 +3,7 @@
 # SDK boilerplate lives in generated/rexglue.cmake.
 
 cmake_minimum_required(VERSION 3.25)
-project(tabletennis VERSION 0.2.0 LANGUAGES CXX)
+project(tabletennis VERSION 0.2.1 LANGUAGES CXX)
 if(APPLE)
     enable_language(OBJCXX)
 elseif(WIN32)

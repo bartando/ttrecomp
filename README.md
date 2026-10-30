@@ -202,7 +202,7 @@ macOS (Apple Silicon), with Homebrew LLVM - Apple Clang is not supported:
 brew install llvm cmake ninja molten-vk
 
 cd third_party/rexglue-sdk
-LLVM=/opt/homebrew/opt/llvm@21
+LLVM=/opt/homebrew/opt/llvm
 cmake -S . -B out/macos-rel -G Ninja \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DCMAKE_C_COMPILER=$LLVM/bin/clang \

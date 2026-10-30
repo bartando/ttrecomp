@@ -156,10 +156,10 @@
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/out/build/${presetName}",
       "cacheVariables": {
-        "CMAKE_C_COMPILER": "/opt/homebrew/opt/llvm@21/bin/clang",
-        "CMAKE_CXX_COMPILER": "/opt/homebrew/opt/llvm@21/bin/clang++",
-        "CMAKE_AR": "/opt/homebrew/opt/llvm@21/bin/llvm-ar",
-        "CMAKE_RANLIB": "/opt/homebrew/opt/llvm@21/bin/llvm-ranlib",
+        "CMAKE_C_COMPILER": "/opt/homebrew/opt/llvm/bin/clang",
+        "CMAKE_CXX_COMPILER": "/opt/homebrew/opt/llvm/bin/clang++",
+        "CMAKE_AR": "/opt/homebrew/opt/llvm/bin/llvm-ar",
+        "CMAKE_RANLIB": "/opt/homebrew/opt/llvm/bin/llvm-ranlib",
         "CMAKE_OSX_DEPLOYMENT_TARGET": "12.0",
         "REXSDK_DIR": "${sourceDir}/third_party/rexglue-sdk"
       },

@@ -7,8 +7,8 @@ Snapshots come from tools/gen_function_profile.py. Score is calls/s * size, so
 a big function called a lot outranks a tiny one called slightly more. Names,
 sizes and lift status come from the tt-decomp checkout (TT_DECOMP, default
 ~/PhpstormProjects/tt-decomp): `spec` means a lift-check spec exists for it
-(run lift-check to see if it passes), `lifted` only that a `@ 0x...` marker
-exists in src/, which can be a placeholder.
+(run lift-check to see if it passes), `lifted` only that a marked definition
+exists in src/, which can still be a placeholder.
 """
 import os
 import re
@@ -39,12 +39,10 @@ def decomp_symbols(decomp):
 
 
 def decomp_lifted(decomp):
-    lifted = set()
-    for path in (decomp / "src").rglob("*"):
-        if path.suffix in (".c", ".cpp"):
-            text = path.read_text(errors="ignore")
-            lifted.update(int(address, 16) for address in re.findall(r"@\s*0x(82[0-9A-Fa-f]{6})", text))
-    return lifted
+    # tt-decomp's progress counter knows a marked definition from a declaration.
+    sys.path.insert(0, str(decomp / "tools"))
+    from progress import lifted
+    return lifted(decomp)
 
 
 def decomp_specs(decomp):

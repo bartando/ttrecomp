@@ -4,8 +4,8 @@
     python3 tools/gen_function_trace.py OUT.cpp 823E0000-823F4000 [823AD000-823B4000 ...]
 
 Every generated function in the ranges gets an override that logs its first
-three calls, then runs the original. Functions src/native already overrides
-are skipped. Build it in with -DTABLETENNIS_FUNCTION_TRACE_SOURCE=OUT.cpp;
+three calls, then runs the original. Functions src/ already overrides are
+skipped. Build it in with -DTABLETENNIS_FUNCTION_TRACE_SOURCE=OUT.cpp;
 debugging only.
 """
 import re
@@ -15,20 +15,28 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def main():
-    if len(sys.argv) < 3:
-        sys.exit(__doc__)
-    ranges = [tuple(int(part, 16) for part in spec.split("-")) for spec in sys.argv[2:]]
+def traceable(ranges):
+    """Generated functions in the ranges that nothing in src/ overrides."""
     defined = set()
     for path in (ROOT / "generated/default").glob("tabletennis_recomp.*.cpp"):
         defined.update(int(name, 16) for name in
                        re.findall(r"^DEFINE_REX_FUNC\(sub_([0-9A-F]+)\)", path.read_text(), re.M))
     overridden = set()
-    for path in (ROOT / "src/native").glob("*.cpp"):
+    for path in (ROOT / "src").rglob("*.cpp"):
         overridden.update(int(name, 16) for name in
                           re.findall(r"REX_FUNC\(sub_([0-9A-F]+)\)", path.read_text()))
-    traced = sorted(address for address in defined - overridden
-                    if any(low <= address < high for low, high in ranges))
+    return sorted(address for address in defined - overridden
+                  if any(low <= address < high for low, high in ranges))
+
+
+def parse_ranges(specs):
+    return [tuple(int(part, 16) for part in spec.split("-")) for spec in specs]
+
+
+def main():
+    if len(sys.argv) < 3:
+        sys.exit(__doc__)
+    traced = traceable(parse_ranges(sys.argv[2:]))
     lines = [
         '#include "generated/default/tabletennis_init.h"',
         "",
